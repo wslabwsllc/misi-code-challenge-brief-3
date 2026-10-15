@@ -1,0 +1,10 @@
+@* Field-level message linked from the control with aria-describedby="{Id}". Renders nothing when there is no error. *@
+@if (Errors is { Length: > 0 })
+{
+    <p class="field__error" id="@Id">@string.Join(" ", Errors)</p>
+}
+
+@code {
+    [Parameter] public string[]? Errors { get; set; }
+    [Parameter, EditorRequired] public string Id { get; set; } = "";
+}

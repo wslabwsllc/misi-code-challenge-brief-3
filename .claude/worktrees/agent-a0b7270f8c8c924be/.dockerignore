@@ -1,0 +1,23 @@
+# Keep secrets, local data, history and build output out of every build context.
+.git
+.gitignore
+.data
+**/.data
+.env
+.env.*
+**/*.pfx
+**/*.key
+**/bin
+**/obj
+**/TestResults
+**/logs
+**/*.log
+.vs
+.vscode
+.idea
+**/.DS_Store
+tests
+tools
+docs
+playwright-report
+test-results

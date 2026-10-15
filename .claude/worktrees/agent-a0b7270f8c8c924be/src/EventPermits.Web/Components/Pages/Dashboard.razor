@@ -1,0 +1,29 @@
+@page "/dashboard"
+@attribute [Authorize(Policy = Cap.ViewDashboard)]
+@rendermode InteractiveServer
+@inherits AppPage
+
+<PageTitle>Operations Dashboard · Memorial Event Operations</PageTitle>
+<PageHeader Title="Operations Dashboard" Lead="Your work for today and the pages your roles can open." />
+<ProblemAlert Problem="Problem" />
+
+@if (Me is not null)
+{
+    <section class="card" aria-labelledby="pages-title">
+        <h2 id="pages-title">Your pages</h2>
+        <div class="grid-3">
+            @foreach (var entry in PageCatalog.All.Where(p => Me.Can(p.Capability)).OrderBy(p => p.Number))
+            {
+                <a class="kpi" href="@entry.Route.TrimStart('/')">
+                    <span class="kpi__label">@entry.Number.ToString("D2") · @entry.Group</span>
+                    <strong>@entry.Title</strong>
+                    <span class="kpi__label">@entry.Purpose</span>
+                </a>
+            }
+        </div>
+    </section>
+}
+
+@code {
+    protected override Task OnInitializedAsync() => LoadAsync(_ => Task.CompletedTask);
+}

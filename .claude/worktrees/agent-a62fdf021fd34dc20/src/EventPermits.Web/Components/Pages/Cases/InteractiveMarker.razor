@@ -1,0 +1,5 @@
+@* Test hook: present only once the page runs interactively (after prerendering), so browser tests click live controls. *@
+@if (RendererInfo.IsInteractive)
+{
+    <span data-interactive hidden></span>
+}

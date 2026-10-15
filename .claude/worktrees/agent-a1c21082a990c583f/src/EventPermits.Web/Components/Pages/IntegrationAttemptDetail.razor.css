@@ -1,0 +1,17 @@
+.att-layout { display: grid; gap: var(--space-4); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.att-layout > .card { margin: 0 !important; min-width: 0; }
+.att-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.att-head h2 { margin: 0; }
+.att-wrap { overflow-wrap: anywhere; word-break: break-word; }
+.att-pre {
+  margin: 0 0 var(--space-4); padding: var(--space-3); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font: .85rem/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto;
+}
+.att-section { margin-top: var(--space-4) !important; }
+.att-section__title { margin: 0; padding: var(--space-4) var(--space-4) var(--space-2); }
+.att-pad { padding: 0 var(--space-4) var(--space-4); }
+.att-timeline { margin: 0 var(--space-4) var(--space-4) var(--space-5); overflow-wrap: anywhere; }
+
+@media (max-width: 900px) {
+  .att-layout { grid-template-columns: 1fr; }
+}

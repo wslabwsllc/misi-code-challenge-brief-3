@@ -1,0 +1,10 @@
+@* Field-level messages linked to the control with aria-describedby (rendered only when there is a message). *@
+@if (Messages.Length > 0)
+{
+    <p class="field__error" id="@Id" data-testid="field-error">@string.Join(" ", Messages)</p>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Id { get; set; } = "";
+    [Parameter] public string[] Messages { get; set; } = [];
+}

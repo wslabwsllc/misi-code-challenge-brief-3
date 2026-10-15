@@ -1,0 +1,33 @@
+.roster-kpis { margin-bottom: var(--space-4); }
+.roster-table tr.is-selected { background: var(--brand-tint); }
+.flags { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: .85rem; }
+.flags li { display: flex; align-items: baseline; gap: 6px; }
+.flags li::before { font-weight: 700; width: 1em; flex: none; }
+.flag--ok { color: var(--ok); }
+.flag--ok::before { content: "✓"; }
+.flag--todo { color: var(--warn); }
+.flag--todo::before { content: "…"; }
+.flag--bad { color: var(--danger); }
+.flag--bad::before { content: "!"; }
+.flag--info { color: var(--ink-muted); }
+.flag--info::before { content: "·"; }
+.roster-detail { margin-top: var(--space-4); }
+.roster-detail h2, .roster-detail h3 { margin: 0; }
+.staff-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.staff-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.print-only { display: none; }
+@media print {
+  .print-only { display: block; margin: 0 0 8pt; }
+  .roster-table td, .roster-table th { padding: 4pt 6pt; }
+  .roster-table .chip { border: 1px solid #666; background: none; color: #000; }
+}
+@media (max-width: 720px) {
+  /* Cards: keep multi-line cell content together beside its label. */
+  .table--cards td { display: block; position: relative; padding-left: calc(9.5em + var(--space-5)); min-height: 1.6em; overflow-wrap: anywhere; }
+  .table--cards td::before { position: absolute; left: var(--space-4); width: 9.5em; }
+  .table--cards caption { display: block; }
+}
+@media (max-width: 720px) {
+  .roster-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+  .roster-kpis .kpi { padding: var(--space-3); }
+}

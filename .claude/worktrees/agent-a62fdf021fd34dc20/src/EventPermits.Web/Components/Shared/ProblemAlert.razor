@@ -1,0 +1,44 @@
+@* Announced summary of the last failed action. Field messages are rendered next to each field. *@
+@if (Problem is not null)
+{
+    <div class="alert @(Problem.Retryable || Problem.StatusCode == 409 ? "alert--warning" : "alert--error")" role="alert" data-testid="problem" data-status="@Problem.StatusCode" data-code="@Problem.Code">
+        <p class="alert__title">
+            <span class="alert__icon" aria-hidden="true">@(Problem.Retryable ? "!" : "×")</span>
+            <strong>@Heading</strong>
+        </p>
+        <p>@Problem.Title</p>
+        @if (Problem.Errors.Count > 0)
+        {
+            <ul>
+                @foreach (var (_, messages) in Problem.Errors)
+                {
+                    foreach (var message in messages)
+                    {
+                        <li>@message</li>
+                    }
+                }
+            </ul>
+        }
+        @if (Problem.Retryable && OnRetry.HasDelegate)
+        {
+            <button type="button" class="btn btn--primary btn--small" @onclick="OnRetry" data-testid="retry">Retry</button>
+        }
+        <p class="alert__ref">Reference <code>@Problem.CorrelationId</code> · HTTP @Problem.StatusCode · @Problem.Code</p>
+    </div>
+}
+
+@code {
+    [Parameter] public UiProblem? Problem { get; set; }
+    [Parameter] public EventCallback OnRetry { get; set; }
+
+    private string Heading => Problem?.StatusCode switch
+    {
+        400 => "Check the highlighted fields",
+        403 => "Not allowed",
+        404 => "Not found",
+        409 => "Someone else changed this record",
+        422 => "This step is not possible yet",
+        503 => "Temporarily unavailable — your input is kept",
+        _ => "The action failed",
+    };
+}

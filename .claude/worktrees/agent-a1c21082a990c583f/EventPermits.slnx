@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EventPermits.Domain/EventPermits.Domain.csproj" />
+    <Project Path="src/EventPermits.Application/EventPermits.Application.csproj" />
+    <Project Path="src/EventPermits.Infrastructure/EventPermits.Infrastructure.csproj" />
+    <Project Path="src/EventPermits.Web/EventPermits.Web.csproj" />
+    <Project Path="src/EventPermits.Mocks/EventPermits.Mocks.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EventPermits.UnitTests/EventPermits.UnitTests.csproj" />
+    <Project Path="tests/EventPermits.IntegrationTests/EventPermits.IntegrationTests.csproj" />
+    <Project Path="tests/EventPermits.BrowserTests/EventPermits.BrowserTests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Dev/Dev.csproj" />
+  </Folder>
+</Solution>

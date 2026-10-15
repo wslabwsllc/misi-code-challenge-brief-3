@@ -1,0 +1,395 @@
+@page "/venues/map"
+@attribute [Authorize(Policy = Cap.ViewMap)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@inject AdminService Admin
+@inject GeocodingService Geocoding
+
+<PageTitle>Venue Map · Memorial Event Operations</PageTitle>
+<PageHeader Title="Geolocation & Venue Map" Lead="Geocoded venue locations, drawn locally without map tiles, with the same data in an accessible table. Coordinates are stored only after a System Admin confirms a candidate." />
+<ProblemAlert Problem="Problem" OnRetry="RetryAsync" />
+<LiveRegion Message="@Announcement" />
+
+<form class="filters" @onsubmit:preventDefault>
+    <div class="field">
+        <label for="m-cemetery">Area</label>
+        <select id="m-cemetery" value="@(_cemeteryId?.ToString() ?? "")" @onchange="CemeteryChanged" data-testid="map-cemetery">
+            <option value="">All cemeteries (regional overview)</option>
+            @foreach (var c in _cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+</form>
+
+@if (Loading && _venues.Count == 0)
+{
+    <p class="muted" role="status">Loading venues…</p>
+}
+else
+{
+    var plotted = Visible.Where(v => v.Latitude is not null && v.Longitude is not null).ToList();
+    <div class="split">
+        <section class="card" aria-labelledby="map-title" data-testid="map">
+            <h2 id="map-title">@(Cemetery?.Name ?? "All cemeteries")</h2>
+            <p class="muted" id="map-desc">@Ui.Plural(plotted.Count, "venue is", "venues are") plotted from stored coordinates; @Ui.Plural(Visible.Count - plotted.Count, "venue has", "venues have") none yet. Select a marker or a table row to see details.</p>
+            <div class="vmap">
+                <svg viewBox="0 0 @W @H" role="group" aria-labelledby="map-title" aria-describedby="map-desc" data-testid="map-svg">
+                    <rect x="0" y="0" width="@W" height="@H" class="vmap__bg" />
+                    @foreach (var (pos, label) in GridLines(plotted, vertical: true))
+                    {
+                        <g aria-hidden="true">
+                            <line x1="@F(pos)" y1="0" x2="@F(pos)" y2="@H" class="vmap__grid" />
+                            <text x="@F(pos + 4)" y="@(H - 8)" class="vmap__gridlabel">@label</text>
+                        </g>
+                    }
+                    @foreach (var (pos, label) in GridLines(plotted, vertical: false))
+                    {
+                        <g aria-hidden="true">
+                            <line x1="0" y1="@F(pos)" x2="@W" y2="@F(pos)" class="vmap__grid" />
+                            <text x="6" y="@F(pos - 4)" class="vmap__gridlabel">@label</text>
+                        </g>
+                    }
+                    @if (plotted.Count == 0)
+                    {
+                        <g><text x="@(W / 2)" y="@(H / 2)" text-anchor="middle" class="vmap__empty">No venue in this area has coordinates yet</text></g>
+                    }
+                    @foreach (var v in plotted.OrderBy(v => v.Id == _selectedId))
+                    {
+                        var (x, y) = Project(v, plotted);
+                        var selected = v.Id == _selectedId;
+                        <a href="@SelectHref(v.Id)" aria-label="@MarkerLabel(v)" aria-current="@(selected ? "true" : null)" class="vmap__marker @(v.CoordinatesVerified ? "is-verified" : "is-unverified") @(selected ? "is-selected" : null)" data-testid="map-marker" data-code="@v.Code">
+                            @if (selected)
+                            {
+                                <circle cx="@F(x)" cy="@F(y)" r="22" class="vmap__halo" />
+                            }
+                            <circle cx="@F(x)" cy="@F(y)" r="@(selected ? 11 : 8)" class="vmap__dot" />
+                            <text x="@F(x + 14)" y="@F(y + 4)" class="vmap__label">@(_cemeteryId is null ? v.CemeteryName : v.Name)</text>
+                        </a>
+                    }
+                </svg>
+            </div>
+            <ul class="vmap-legend" aria-label="Map legend">
+                <li><span class="vmap-legend__dot is-verified" aria-hidden="true"></span>Verified coordinates (confirmed by an admin)</li>
+                <li><span class="vmap-legend__dot is-unverified" aria-hidden="true"></span>Unverified (address changed or geocoder unavailable)</li>
+                <li><span class="vmap-legend__dot is-selected" aria-hidden="true"></span>Selected venue</li>
+            </ul>
+        </section>
+
+        <section class="card" aria-labelledby="detail-title" data-testid="map-detail">
+            @if (Selected is not { } s)
+            {
+                <h2 id="detail-title">Venue details</h2>
+                <p class="muted">Select a venue on the map or in the table.</p>
+            }
+            else
+            {
+                <h2 id="detail-title">@s.Name</h2>
+                <dl class="dl">
+                    <dt>Cemetery</dt><dd>@s.CemeteryName</dd>
+                    <dt>Address</dt><dd>@s.Address</dd>
+                    <dt>Coordinates</dt><dd data-testid="map-detail-coords">@(s.Latitude is { } la && s.Longitude is { } lo ? $"{Deg(la)}, {Deg(lo)}" : "None stored")</dd>
+                    <dt>Check</dt><dd><span class="chip @CheckClass(s)" data-testid="map-detail-check">@CheckText(s)</span></dd>
+                    @if (s.GeocodeLabel is not null)
+                    {
+                        <dt>Matched place</dt><dd>@s.GeocodeLabel</dd>
+                    }
+                </dl>
+
+                @if (CanConfirm)
+                {
+                    <div class="row geo-actions">
+                        <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="LookupAsync" data-testid="geo-lookup">@(Busy ? "Looking up…" : "Look up coordinates")</button>
+                        <a class="btn" href="admin/venues">Edit address</a>
+                    </div>
+
+                    @if (_outcome is { } o && o.VenueId == s.Id)
+                    {
+                        @if (!o.Result.Succeeded)
+                        {
+                            <div class="alert alert--warning" role="alert" data-testid="geo-unavailable">
+                                <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span><strong>Geocoder unavailable</strong></p>
+                                <p>@o.Result.Message No coordinates were invented; the venue stays editable.</p>
+                                <button type="button" class="btn btn--small btn--primary" disabled="@Busy" @onclick="LookupAsync" data-testid="geo-retry">Retry</button>
+                            </div>
+                        }
+                        else if (o.Result.Candidates.Count == 0)
+                        {
+                            <div class="alert alert--info" role="status" data-testid="geo-nomatch">
+                                <p class="alert__title"><strong>No match</strong></p>
+                                <p>@o.Result.Message Check the address on Administration: Venues and try again.</p>
+                            </div>
+                        }
+                        else
+                        {
+                            <form class="form" @onsubmit="ConfirmAsync" @onsubmit:preventDefault novalidate data-testid="geo-candidates">
+                                <fieldset aria-describedby="@Describe("candidateId", "geo-hint")">
+                                    <legend>Candidates</legend>
+                                    <p class="field__hint" id="geo-hint">@(o.Result.RequiresChoice ? "The top candidates are tied on confidence: choose one explicitly." : "Highest confidence first. Check the label before confirming.")</p>
+                                    @foreach (var (c, i) in o.Result.Candidates.Select((c, i) => (c, i)))
+                                    {
+                                        <label class="check candidate">
+                                            <input type="radio" name="candidate" value="@c.Id" checked="@(_candidateId == c.Id)" @onchange="() => _candidateId = c.Id"
+                                                   aria-invalid="@(i == 0 ? Invalid("candidateId") : null)" data-testid="geo-candidate" />
+                                            <span><strong>@c.Label</strong><br /><span class="muted">@Deg(c.Latitude), @Deg(c.Longitude) · confidence @c.Confidence.ToString("0.00", Ui.Culture)</span></span>
+                                        </label>
+                                    }
+                                    <FieldErrors Id="@ErrorId("candidateId")" Messages="@(Errors("candidateId"))" />
+                                </fieldset>
+                                <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="geo-confirm">Confirm selected coordinates</button>
+                            </form>
+                        }
+                    }
+                    @if (_conflictRows is not null)
+                    {
+                        <ConflictPanel Rows="_conflictRows" OnReload="ReloadAfterConflictAsync" />
+                    }
+                }
+                else
+                {
+                    <p class="muted" data-testid="read-only">Only a System Admin can look up and confirm coordinates.</p>
+                }
+
+                <h3>Lookup history</h3>
+                @if (_history.Count == 0)
+                {
+                    <p class="muted">No lookups yet.</p>
+                }
+                else
+                {
+                    <ul class="timeline" data-testid="geo-history">
+                        @foreach (var h in _history)
+                        {
+                            var chosen = h.Candidates.FirstOrDefault(c => c.Selected);
+                            <li>
+                                <span class="timeline__meta">@Ui.Utc(h.CreatedAt) · @(h.Succeeded ? "answered" : "geocoder unavailable")</span><br />
+                                @h.Detail
+                                @if (chosen is not null) { <br /><strong>Confirmed:</strong> @chosen.Label }
+                            </li>
+                        }
+                    </ul>
+                }
+            }
+        </section>
+    </div>
+
+    <section class="card card--flush" aria-labelledby="list-title" data-testid="map-list">
+        <h2 class="list-title" id="list-title">Venue locations</h2>
+        <div class="table-wrap">
+            <table class="table table--cards">
+                <caption class="visually-hidden">Venues with coordinates, verification state and geocode confidence</caption>
+                <thead><tr><th scope="col">Venue</th><th scope="col">Latitude</th><th scope="col">Longitude</th><th scope="col">Check</th><th scope="col">Confidence</th><th scope="col"><span class="visually-hidden">Select</span></th></tr></thead>
+                <tbody>
+                    @foreach (var v in Visible)
+                    {
+                        var selected = v.Id == _selectedId;
+                        <tr class="@(selected ? "is-selected" : null)" aria-current="@(selected ? "true" : null)" data-testid="map-row" data-code="@v.Code">
+                            <td data-label="Venue"><strong>@v.Name</strong><br /><span class="muted">@v.CemeteryName · @v.Address</span></td>
+                            <td data-label="Latitude">@(v.Latitude is { } la ? Deg(la) : "—")</td>
+                            <td data-label="Longitude">@(v.Longitude is { } lo ? Deg(lo) : "—")</td>
+                            <td data-label="Check"><span class="chip @CheckClass(v)" data-testid="map-row-check">@CheckText(v)</span></td>
+                            <td data-label="Confidence">@(v.GeocodeConfidence is { } gc ? gc.ToString("0.00", Ui.Culture) : "—")</td>
+                            <td data-label="Select"><a href="@SelectHref(v.Id)" data-testid="map-select">@(selected ? "Selected" : "Select")<span class="visually-hidden"> @v.Name</span></a></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+}
+
+@code {
+    private const int W = 1000;
+    private const int H = 620;
+
+    [SupplyParameterFromQuery(Name = "venue")] public Guid? VenueQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+
+    private sealed record Outcome(Guid VenueId, GeocodeOutcome Result);
+
+    private IReadOnlyList<VenueRow> _venues = [];
+    private IReadOnlyList<CemeteryRow> _cemeteries = [];
+    private IReadOnlyList<GeocodeLookup> _history = [];
+    private Guid? _selectedId;
+    private Guid? _cemeteryId;
+    private Outcome? _outcome;
+    private Guid? _candidateId;
+    private Func<Task>? _retry;
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+
+    private VenueRow? Selected => _venues.FirstOrDefault(v => v.Id == _selectedId);
+    private CemeteryRow? Cemetery => _cemeteries.FirstOrDefault(c => c.Id == _cemeteryId);
+    private IEnumerable<VenueRow> VisibleQuery => _venues.Where(v => _cemeteryId is null || v.CemeteryId == _cemeteryId);
+    private List<VenueRow> Visible => VisibleQuery.ToList();
+    private bool CanConfirm => Me?.Can(Cap.ConfirmGeocode) == true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _retry = LoadPageAsync;
+        await LoadPageAsync();
+    }
+
+    private async Task LoadPageAsync()
+    {
+        Problem = null;
+        _conflictRows = null;
+        await LoadAsync(async me =>
+        {
+            if (_cemeteries.Count == 0) _cemeteries = await Admin.CemeteriesAsync(me);
+            _venues = await Admin.VenuesAsync(me);
+            _selectedId = VenueQuery is { } v && _venues.Any(x => x.Id == v) ? v : null;
+            _cemeteryId = CemeteryQuery ?? Selected?.CemeteryId;
+            if (_outcome?.VenueId != _selectedId)
+            {
+                _outcome = null;
+                _candidateId = null;
+            }
+            _history = _selectedId is { } id ? await Geocoding.HistoryAsync(me, id) : [];
+        });
+    }
+
+    private Task RetryAsync() => _retry?.Invoke() ?? LoadPageAsync();
+
+    private string SelectHref(Guid venueId) =>
+        Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["venue"] = venueId.ToString(), ["cemetery"] = _cemeteryId?.ToString() });
+
+    private void CemeteryChanged(ChangeEventArgs e) =>
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["cemetery"] = Guid.TryParse(e.Value?.ToString(), out var g) ? g.ToString() : null,
+            ["venue"] = null,
+        }));
+
+    private async Task LookupAsync()
+    {
+        if (Selected is not { } venue) return;
+        _conflictRows = null;
+        _retry = LookupAsync;
+        GeocodeOutcome? result = null;
+        var ok = await RunAsync(async me => result = await Geocoding.LookupAsync(me, venue.Id));
+        if (!ok || result is null) return;
+        _outcome = new Outcome(venue.Id, result);
+        // A tie on the top confidence needs an explicit choice; otherwise the best candidate is preselected.
+        _candidateId = result.RequiresChoice ? null : result.Candidates.FirstOrDefault()?.Id;
+        Announcement = !result.Succeeded ? "The geocoder is unavailable; coordinates stay unverified."
+            : result.Candidates.Count == 0 ? "No match for this address."
+            : result.RequiresChoice ? $"{result.Candidates.Count} candidates tied on confidence. Choose one."
+            : $"{result.Candidates.Count} candidates found.";
+        await ReloadVenuesAsync();
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (Selected is not { } venue || _outcome is null) return;
+        _conflictRows = null;
+        if (_candidateId is null || _outcome.Result.Candidates.All(c => c.Id != _candidateId))
+        {
+            Fail(new Dictionary<string, string[]> { ["candidateId"] = ["Choose one of the candidates before confirming."] });
+            return;
+        }
+        var candidate = _outcome.Result.Candidates.First(c => c.Id == _candidateId);
+        var ok = await RunAsync(me => Geocoding.ConfirmAsync(me, candidate.Id, venue.Version), $"Coordinates for {venue.Name} confirmed: {Deg(candidate.Latitude)}, {Deg(candidate.Longitude)}.");
+        var problem = Problem;
+        await ReloadVenuesAsync();
+        if (ok)
+        {
+            _outcome = null;
+            _candidateId = null;
+        }
+        else if (problem?.StatusCode == 409 && Selected is { } saved)
+        {
+            _conflictRows =
+            [
+                new("Address", saved.Address, venue.Address),
+                new("Coordinates", saved.Latitude is { } la && saved.Longitude is { } lo ? $"{Deg(la)}, {Deg(lo)}" : null, $"{Deg(candidate.Latitude)}, {Deg(candidate.Longitude)}"),
+                new("Verified", saved.CoordinatesVerified ? "Yes" : "No", "Yes"),
+            ];
+        }
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        _conflictRows = null;
+        _outcome = null;
+        _candidateId = null;
+        Problem = null;
+        await ReloadVenuesAsync();
+        Announcement = "Reloaded the saved venue. Run the lookup again before confirming.";
+    }
+
+    private async Task ReloadVenuesAsync()
+    {
+        var me = await GetActorAsync();
+        _venues = await Admin.VenuesAsync(me);
+        if (_selectedId is { } id) _history = await Geocoding.HistoryAsync(me, id);
+    }
+
+    // ---- presentation helpers (no business rules)
+
+    private static string Deg(double value) => value.ToString("0.00000", Ui.Culture);
+
+    private static string F(double value) => value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string CheckText(VenueRow v) => (v.Latitude, v.CoordinatesVerified) switch
+    {
+        (null, _) => "Missing — not geocoded",
+        (_, true) => "Verified",
+        _ => "Unverified — confirm again",
+    };
+
+    private static string CheckClass(VenueRow v) => (v.Latitude, v.CoordinatesVerified) switch
+    {
+        (null, _) => "chip--draft",
+        (_, true) => "chip--good",
+        _ => "chip--attention",
+    };
+
+    private static string MarkerLabel(VenueRow v) =>
+        $"{v.Name}, {v.CemeteryName}: {Deg(v.Latitude!.Value)}, {Deg(v.Longitude!.Value)}, {(v.CoordinatesVerified ? "verified" : "unverified")}. Select to show details.";
+
+    /// <summary>Equirectangular projection of the visible points into the SVG box, with padding and a minimum span.</summary>
+    private static (double MinLat, double MaxLat, double MinLon, double MaxLon) Bounds(IReadOnlyList<VenueRow> points)
+    {
+        if (points.Count == 0) return (0, 1, 0, 1);
+        var minLat = points.Min(p => p.Latitude!.Value);
+        var maxLat = points.Max(p => p.Latitude!.Value);
+        var minLon = points.Min(p => p.Longitude!.Value);
+        var maxLon = points.Max(p => p.Longitude!.Value);
+        var midLat = (minLat + maxLat) / 2;
+        var cos = Math.Max(0.2, Math.Cos(midLat * Math.PI / 180));
+        // Keep the aspect ratio of the box: widen whichever span is relatively smaller.
+        var latSpan = Math.Max(maxLat - minLat, 0.01);
+        var lonSpan = Math.Max(maxLon - minLon, 0.01);
+        var ratio = (double)W / H;
+        if (lonSpan * cos / latSpan < ratio) lonSpan = latSpan * ratio / cos;
+        else latSpan = lonSpan * cos / ratio;
+        latSpan *= 1.35;
+        lonSpan *= 1.35;
+        var midLon = (minLon + maxLon) / 2;
+        return (midLat - latSpan / 2, midLat + latSpan / 2, midLon - lonSpan / 2, midLon + lonSpan / 2);
+    }
+
+    private static (double X, double Y) Project(VenueRow v, IReadOnlyList<VenueRow> points)
+    {
+        var (minLat, maxLat, minLon, maxLon) = Bounds(points);
+        var x = (v.Longitude!.Value - minLon) / (maxLon - minLon) * W;
+        var y = H - (v.Latitude!.Value - minLat) / (maxLat - minLat) * H;
+        return (x, y);
+    }
+
+    private static IEnumerable<(double Pos, string Label)> GridLines(IReadOnlyList<VenueRow> points, bool vertical)
+    {
+        if (points.Count == 0) yield break;
+        var (minLat, maxLat, minLon, maxLon) = Bounds(points);
+        var (min, max) = vertical ? (minLon, maxLon) : (minLat, maxLat);
+        var raw = (max - min) / 5;
+        var step = new[] { 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10 }.First(s => s >= raw * 0.8);
+        for (var value = Math.Ceiling(min / step) * step; value < max; value += step)
+        {
+            var pos = vertical ? (value - min) / (max - min) * W : H - (value - min) / (max - min) * H;
+            var digits = step < 0.01 ? 3 : step < 0.1 ? 2 : step < 1 ? 1 : 0;
+            yield return (pos, value.ToString("F" + digits, Ui.Culture) + "°");
+        }
+    }
+}

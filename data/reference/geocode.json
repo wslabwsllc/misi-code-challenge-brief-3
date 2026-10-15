@@ -1,0 +1,208 @@
+{
+  "note": "Fictional geocoder answers keyed by exact address. Unknown queries return an empty list.",
+  "entries": [
+    {
+      "query": "10 Chapel of Light Path, Fairhaven, Practice State",
+      "venueCode": "RMP-CHAPEL",
+      "candidates": [
+        {
+          "label": "Riverside Chapel of Light, 10 Chapel of Light Path, Fairhaven, Practice State",
+          "latitude": 39.1,
+          "longitude": -76.2,
+          "confidence": 0.94
+        },
+        {
+          "label": "Fairhaven town centre",
+          "latitude": 39.12,
+          "longitude": -76.22,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "17 Great Lawn Path, Fairhaven, Practice State",
+      "venueCode": "RMP-LAWN",
+      "candidates": [
+        {
+          "label": "Riverside Great Lawn, 17 Great Lawn Path, Fairhaven, Practice State",
+          "latitude": 39.104,
+          "longitude": -76.195,
+          "confidence": 0.94
+        },
+        {
+          "label": "Fairhaven town centre",
+          "latitude": 39.124,
+          "longitude": -76.215,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "24 Memorial Pavilion Path, Fairhaven, Practice State",
+      "venueCode": "RMP-PAVILION",
+      "candidates": [
+        {
+          "label": "Riverside Memorial Pavilion, 24 Memorial Pavilion Path, Fairhaven, Practice State",
+          "latitude": 39.108,
+          "longitude": -76.19,
+          "confidence": 0.94
+        },
+        {
+          "label": "Fairhaven town centre",
+          "latitude": 39.128,
+          "longitude": -76.21,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "31 Quiet Garden Path, Fairhaven, Practice State",
+      "venueCode": "RMP-GARDEN",
+      "candidates": [
+        {
+          "label": "Riverside Quiet Garden, 31 Quiet Garden Path, Fairhaven, Practice State",
+          "latitude": 39.112,
+          "longitude": -76.185,
+          "confidence": 0.94
+        },
+        {
+          "label": "Fairhaven town centre",
+          "latitude": 39.132,
+          "longitude": -76.205,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "10 Chapel of Light Path, Brookmere, Practice State",
+      "venueCode": "CHG-CHAPEL",
+      "candidates": [
+        {
+          "label": "Cedar Chapel of Light, 10 Chapel of Light Path, Brookmere, Practice State",
+          "latitude": 41.8,
+          "longitude": -88.1,
+          "confidence": 0.94
+        },
+        {
+          "label": "Brookmere town centre",
+          "latitude": 41.82,
+          "longitude": -88.12,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "17 Great Lawn Path, Brookmere, Practice State",
+      "venueCode": "CHG-LAWN",
+      "candidates": [
+        {
+          "label": "Cedar Great Lawn, 17 Great Lawn Path, Brookmere, Practice State",
+          "latitude": 41.804,
+          "longitude": -88.095,
+          "confidence": 0.94
+        },
+        {
+          "label": "Brookmere town centre",
+          "latitude": 41.824,
+          "longitude": -88.115,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "24 Memorial Pavilion Path, Brookmere, Practice State",
+      "venueCode": "CHG-PAVILION",
+      "candidates": [
+        {
+          "label": "Cedar Memorial Pavilion, 24 Memorial Pavilion Path, Brookmere, Practice State",
+          "latitude": 41.808,
+          "longitude": -88.09,
+          "confidence": 0.94
+        },
+        {
+          "label": "Brookmere town centre",
+          "latitude": 41.828,
+          "longitude": -88.11,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "31 Quiet Garden Path, Brookmere, Practice State",
+      "venueCode": "CHG-GARDEN",
+      "candidates": [
+        {
+          "label": "Cedar Quiet Garden (north entrance), Brookmere",
+          "latitude": 41.812,
+          "longitude": -88.085,
+          "confidence": 0.81
+        },
+        {
+          "label": "Cedar Quiet Garden (south entrance), Brookmere",
+          "latitude": 41.809,
+          "longitude": -88.083,
+          "confidence": 0.81
+        }
+      ]
+    },
+    {
+      "query": "10 Chapel of Light Path, Sunridge, Practice State",
+      "venueCode": "MVR-CHAPEL",
+      "candidates": [
+        {
+          "label": "Mesa Chapel of Light, 10 Chapel of Light Path, Sunridge, Practice State",
+          "latitude": 35.1,
+          "longitude": -106.6,
+          "confidence": 0.94
+        },
+        {
+          "label": "Sunridge town centre",
+          "latitude": 35.12,
+          "longitude": -106.62,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "17 Great Lawn Path, Sunridge, Practice State",
+      "venueCode": "MVR-LAWN",
+      "candidates": [
+        {
+          "label": "Mesa Great Lawn, 17 Great Lawn Path, Sunridge, Practice State",
+          "latitude": 35.104,
+          "longitude": -106.595,
+          "confidence": 0.94
+        },
+        {
+          "label": "Sunridge town centre",
+          "latitude": 35.124,
+          "longitude": -106.615,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "24 Memorial Pavilion Path, Sunridge, Practice State",
+      "venueCode": "MVR-PAVILION",
+      "candidates": [
+        {
+          "label": "Mesa Memorial Pavilion, 24 Memorial Pavilion Path, Sunridge, Practice State",
+          "latitude": 35.108,
+          "longitude": -106.59,
+          "confidence": 0.94
+        },
+        {
+          "label": "Sunridge town centre",
+          "latitude": 35.128,
+          "longitude": -106.61,
+          "confidence": 0.42
+        }
+      ]
+    },
+    {
+      "query": "31 Quiet Garden Path, Sunridge, Practice State",
+      "venueCode": "MVR-GARDEN",
+      "candidates": []
+    }
+  ]
+}

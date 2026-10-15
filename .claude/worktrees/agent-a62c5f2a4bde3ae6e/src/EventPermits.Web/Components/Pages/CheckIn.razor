@@ -1,0 +1,312 @@
+@page "/operations/check-in"
+@attribute [Authorize(Policy = Cap.VerifyPermitToken)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject PermitService Permits
+@inject OperationsService Ops
+
+<PageTitle>Event Check-In · Memorial Event Operations</PageTitle>
+<PageHeader Title="Event Check-In" Lead="@LeadText" />
+
+<ProblemAlert Problem="Problem" OnRetry="RetryAsync" />
+<LiveRegion Message="@Announcement" />
+@if (RendererInfo.IsInteractive)
+{
+    <span hidden data-testid="interactive"></span>
+}
+
+@if (!CanRecord && Me is not null)
+{
+    <div class="alert alert--info" data-testid="checkin-readonly">
+        <p class="alert__title"><span class="alert__icon" aria-hidden="true">i</span> <strong>Verify only</strong></p>
+        <p>You can check whether a permit is valid. Arrival, departure and completion are recorded by the attendant assigned to the event.</p>
+    </div>
+}
+
+<section class="card checkin-verify" aria-labelledby="verify-title">
+    <h2 id="verify-title">Verify a permit</h2>
+    <form class="form" @onsubmit="VerifyAsync" @onsubmit:preventDefault novalidate data-testid="verify-form">
+        <div class="field">
+            <label for="permit-code">Short code or QR payload</label>
+            <input id="permit-code" class="checkin-code" type="text" @bind="_code" @bind:event="oninput" autocomplete="off" autocapitalize="characters" spellcheck="false"
+                   maxlength="600" required aria-invalid="@Invalid("code")" aria-describedby="@(Invalid("code") is null ? "code-hint" : "code-hint code-error")" data-testid="checkin-code" />
+            <span class="field__hint" id="code-hint">Type the 10-character code printed under the QR code (for example 7KD3M-Q9X2P), or paste the scanned QR text.</span>
+            @if (Problem?.For("code") is { Length: > 0 } codeErrors)
+            {
+                <p class="field__error" id="code-error">@string.Join(" ", codeErrors)</p>
+            }
+        </div>
+        <button type="submit" class="btn btn--primary btn--big" disabled="@Busy" data-testid="checkin-verify">Verify permit</button>
+    </form>
+</section>
+
+@if (_check is not null)
+{
+    var look = Look(_check.Result);
+    <section class="card verdict verdict--@look.Css" aria-labelledby="verdict-title" data-testid="verdict" data-result="@_check.Result">
+        <div class="verdict__head">
+            <span class="verdict__icon" aria-hidden="true">@look.Icon</span>
+            <div>
+                <h2 id="verdict-title" tabindex="-1">@look.Title</h2>
+                <p class="verdict__reason" data-testid="verdict-reason">@_check.Message</p>
+            </div>
+        </div>
+        @if (_check.ApplicationId is not null)
+        {
+            <dl class="dl">
+                <dt>Event</dt><dd>@_check.EventTitle</dd>
+                <dt>Case</dt><dd>@_check.Reference @if (_check.CaseStatus is { } cs) { <StatusChip Status="cs" /> }</dd>
+                <dt>Permit</dt><dd>@_check.PermitNumber · version @_check.Version</dd>
+                <dt>Venue</dt><dd>@_check.VenueName</dd>
+                @if (_check.StartUtc is { } start)
+                {
+                    <dt>Time</dt><dd>@Local(start, _check.TimeZoneId) – @(_check.EndUtc is { } end ? Ui.LocalTime(end, _check.TimeZoneId) : "")</dd>
+                }
+                @if (_check.WindowOpensAt is { } opens)
+                {
+                    <dt>Check-in opens</dt><dd>@Local(opens, _check.TimeZoneId)</dd>
+                }
+                <dt>Assigned to you</dt><dd>@(_check.AssignedToYou ? "Yes" : "No")</dd>
+            </dl>
+        }
+    </section>
+}
+
+@if (_detail is not null)
+{
+    <section class="card" aria-labelledby="record-title" data-testid="record">
+        <h2 id="record-title">Arrival and departure</h2>
+        @if (_detail.CheckIn is { } ci)
+        {
+            <dl class="dl" data-testid="checkin-record">
+                <dt>Arrived</dt><dd>@Local(ci.CheckedInAt, _detail.TimeZoneId) · recorded by @ci.AttendantName</dd>
+                <dt>Departed</dt><dd>@(ci.CheckedOutAt is { } outAt ? Local(outAt, _detail.TimeZoneId) : "Not yet recorded")</dd>
+                @if (!string.IsNullOrEmpty(ci.Notes))
+                {
+                    <dt>Notes</dt><dd>@ci.Notes</dd>
+                }
+            </dl>
+        }
+        else
+        {
+            <p>No arrival recorded yet.</p>
+        }
+
+        @if (_conflict is not null)
+        {
+            <ConflictPanel Rows="_conflict" OnReload="ReloadDetailAsync" OnReapply="ReapplyAsync" />
+        }
+
+        @if (!CanRecord)
+        {
+            <p class="muted">Read-only for your role.</p>
+        }
+        else if (!_detail.AssignedToYou)
+        {
+            <p class="muted" data-testid="not-assigned">Only the attendant assigned to this event can record arrival and departure.</p>
+        }
+        else if (_detail.Status == CaseStatus.Permitted)
+        {
+            @if (_check?.Result == TokenResult.Valid)
+            {
+                <button type="button" class="btn btn--primary btn--big" disabled="@Busy" @onclick="ArriveAsync" data-testid="checkin-arrive">Record arrival (check in)</button>
+            }
+            else
+            {
+                <p data-testid="arrival-blocked">Arrival can be recorded once the permit verifies as valid inside the check-in window.</p>
+            }
+        }
+        else if (_detail.Status == CaseStatus.CheckedIn && _detail.CheckIn?.CheckedOutAt is null)
+        {
+            <form class="form" @onsubmit="DepartAsync" @onsubmit:preventDefault novalidate data-testid="checkout-form">
+                <div class="field">
+                    <label for="checkout-notes">Departure notes <span class="muted">(optional)</span></label>
+                    <textarea id="checkout-notes" @bind="_notes" maxlength="1000" aria-invalid="@Invalid("notes")"
+                              aria-describedby="@(Invalid("notes") is null ? "notes-hint" : "notes-hint notes-error")" data-testid="checkout-notes"></textarea>
+                    <span class="field__hint" id="notes-hint">Up to 1,000 characters, for example "All guests left, chairs stacked".</span>
+                    @if (Problem?.For("notes") is { Length: > 0 } noteErrors)
+                    {
+                        <p class="field__error" id="notes-error">@string.Join(" ", noteErrors)</p>
+                    }
+                </div>
+                <button type="submit" class="btn btn--primary btn--big" disabled="@Busy" data-testid="checkout-submit">Record departure (check out)</button>
+            </form>
+        }
+    </section>
+
+    @if (_detail.Status is CaseStatus.CheckedIn or CaseStatus.EventCompleted)
+    {
+        <section class="card" aria-labelledby="complete-title" data-testid="complete-section">
+            <h2 id="complete-title">Finish the event</h2>
+            <ReadinessList Items="_detail.Readiness" Key="checkin" Busy="Busy" CanEdit="@(CanRecord && _detail.AssignedToYou && _detail.Status == CaseStatus.CheckedIn)" OnToggle="ToggleAsync"
+                           ReadOnlyReason="@(_detail.Status == CaseStatus.EventCompleted ? "The event is completed; the checklist is kept as it was." : "Read-only: only the assigned attendant ticks the checklist.")" />
+            @if (_detail.Status == CaseStatus.EventCompleted)
+            {
+                <p class="alert alert--success" data-testid="completed">The event is completed. The Operations Manager closes the case after any High or Critical incident is resolved.</p>
+            }
+            else if (CanRecord && _detail.AssignedToYou)
+            {
+                <p class="field__hint" id="complete-hint">Completing needs the departure recorded and every checklist item done.</p>
+                <button type="button" class="btn btn--primary btn--big" disabled="@Busy" aria-describedby="complete-hint" @onclick="CompleteAsync" data-testid="checkin-complete">Complete event</button>
+            }
+        </section>
+    }
+}
+
+@if (_today is { Count: > 0 })
+{
+    <section class="card card--flush" aria-labelledby="today-title">
+        <h2 id="today-title" class="today-title">@(CanRecord ? "Your events today" : "Today's events")</h2>
+        <ul class="today" data-testid="today-list">
+            @foreach (var r in _today)
+            {
+                <li>
+                    <span class="today__time">@Ui.LocalTime(r.StartUtc, r.TimeZoneId)–@Ui.LocalTime(r.EndUtc, r.TimeZoneId)</span>
+                    <span class="today__what"><strong>@r.Title</strong><br /><span class="muted">@r.Reference · @r.VenueName</span></span>
+                    <StatusChip Status="r.Status" />
+                </li>
+            }
+        </ul>
+    </section>
+}
+
+@code {
+    private string _code = "";
+    private string _verifiedCode = "";
+    private string _notes = "";
+    private TokenCheck? _check;
+    private EventDayDetail? _detail;
+    private IReadOnlyList<RosterRow>? _today;
+    private IReadOnlyList<ConflictPanel.Row>? _conflict;
+    private Func<Task>? _lastAction;
+
+    private bool CanRecord => Me?.Can(Cap.RecordCheckIn) == true;
+
+    private string LeadText => CanRecord
+        ? "Verify the permit, record arrival inside the check-in window, then departure and completion."
+        : "Verify a permit token or short code. Recording is done by the assigned attendant.";
+
+    protected override async Task OnInitializedAsync() => await LoadTodayAsync();
+
+    private async Task LoadTodayAsync() => await LoadAsync(async actor =>
+    {
+        if (actor.Can(Cap.ViewRoster)) _today = await Ops.RosterAsync(actor, DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime), null);
+    });
+
+    private async Task RetryAsync()
+    {
+        Problem = null;
+        if (_lastAction is { } again) await again();
+        else await LoadTodayAsync();
+    }
+
+    private async Task VerifyAsync()
+    {
+        _lastAction = VerifyAsync;
+        _conflict = null;
+        var code = _code;
+        var ok = await RunAsync(async actor =>
+        {
+            if (string.IsNullOrWhiteSpace(code)) throw ValidationException.For("code", "Enter the short code or paste the QR payload.");
+            _check = await Permits.VerifyAsync(actor, code);
+            _verifiedCode = code;
+            _detail = _check.ApplicationId is { } id ? await Ops.EventDayAsync(actor, id) : null;
+        });
+        if (ok && _check is not null) Announcement = $"{Look(_check.Result).Title}. {_check.Message}";
+        else if (!ok)
+        {
+            _check = null;
+            _detail = null;
+        }
+    }
+
+    private async Task ArriveAsync()
+    {
+        _lastAction = ArriveAsync;
+        var code = _verifiedCode;
+        await RunAsync(async actor => await Ops.CheckInAsync(actor, code), "Arrival recorded. The event is checked in.");
+        await RefreshAsync("Status", "Checked In");
+    }
+
+    private async Task DepartAsync()
+    {
+        _lastAction = DepartAsync;
+        var notes = _notes;
+        await RunAsync(async actor =>
+        {
+            if (notes.Length > 1000) throw ValidationException.For("notes", "Notes must be 1,000 characters or fewer.");
+            await Ops.CheckOutAsync(actor, _detail!.ApplicationId, _detail.Version, notes);
+        }, "Departure recorded.");
+        if (Problem is null) _notes = "";
+        await RefreshAsync("Departure", "Recorded now");
+    }
+
+    private async Task CompleteAsync()
+    {
+        _lastAction = CompleteAsync;
+        await RunAsync(async actor => await Ops.CompleteAsync(actor, _detail!.ApplicationId, _detail.Version), "Event completed.");
+        await RefreshAsync("Status", "Event Completed");
+    }
+
+    private async Task ToggleAsync((Guid Id, bool Done) change)
+    {
+        var label = _detail?.Readiness.FirstOrDefault(i => i.Id == change.Id)?.Label ?? "";
+        _lastAction = () => ToggleAsync(change);
+        await RunAsync(async actor => await Ops.SetReadinessAsync(actor, change.Id, change.Done, _detail!.Version), $"{(change.Done ? "Done" : "Marked not done")}: {label}.");
+        await RefreshAsync(label, change.Done ? "Done" : "Not done");
+    }
+
+    /// <summary>Reloads the event after an action; on 409 shows what is saved now next to the change the attendant tried.</summary>
+    private async Task RefreshAsync(string field, string mine)
+    {
+        if (_detail is null) return;
+        var problem = Problem;
+        var before = _detail;
+        await LoadAsync(async actor => _detail = await Ops.EventDayAsync(actor, before.ApplicationId));
+        if (problem is not null)
+        {
+            Problem = problem;
+            if (problem.StatusCode == 409)
+            {
+                var saved = _detail.Readiness.FirstOrDefault(i => i.Label == field) is { } item
+                    ? (item.Done ? $"Done by {item.DoneBy}" : "Not done")
+                    : field == "Departure" ? (_detail.CheckIn?.CheckedOutAt is { } at ? Ui.Utc(at) : "Not recorded") : Workflow.Display(_detail.Status);
+                _conflict = [new("Case version", _detail.Version.ToString(Ui.Culture), before.Version.ToString(Ui.Culture)), new(field, saved, mine)];
+            }
+            return;
+        }
+        _conflict = null;
+        _lastAction = null;
+        if (_verifiedCode.Length > 0)
+            await LoadAsync(async actor => _check = await Permits.VerifyAsync(actor, _verifiedCode));
+        await LoadTodayAsync();
+    }
+
+    private async Task ReloadDetailAsync()
+    {
+        _conflict = null;
+        Problem = null;
+        if (_detail is { } d) await LoadAsync(async actor => _detail = await Ops.EventDayAsync(actor, d.ApplicationId));
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflict = null;
+        if (_lastAction is { } again) await again();
+    }
+
+    private sealed record Verdict(string Icon, string Title, string Css);
+
+    private static Verdict Look(TokenResult result) => result switch
+    {
+        TokenResult.Valid => new("✓", "Valid permit", "ok"),
+        TokenResult.Expired => new("⌛", "Expired permit", "bad"),
+        TokenResult.Revoked => new("✕", "Revoked permit", "bad"),
+        TokenResult.Superseded => new("↻", "Superseded permit version", "bad"),
+        TokenResult.Cancelled => new("✕", "Cancelled permit", "bad"),
+        TokenResult.OutsideWindow => new("◷", "Outside the check-in window", "warn"),
+        TokenResult.Malformed => new("?", "Not a permit token", "bad"),
+        _ => new("?", "No matching permit", "bad"),
+    };
+}

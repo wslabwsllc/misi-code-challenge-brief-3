@@ -1,0 +1,8 @@
+.readiness { display: grid; gap: var(--space-2); }
+.readiness legend { font-weight: 600; padding: 0 var(--space-1); }
+.readiness__list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.readiness__item { display: flex; align-items: flex-start; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+.readiness__item.is-done { background: var(--ok-tint); border-color: #b7d6bf; }
+.readiness__item input { margin-top: 3px; width: 24px; height: 24px; flex: none; }
+.readiness__item label { display: grid; gap: 2px; cursor: pointer; min-width: 0; overflow-wrap: anywhere; }
+.readiness__meta { font-size: .82rem; color: var(--ink-muted); }

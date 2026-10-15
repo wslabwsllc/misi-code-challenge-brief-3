@@ -1,0 +1,38 @@
+@* Issues an expiring, audited download link (A-16) on demand. Roles without download rights see metadata only. *@
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject FileService Files
+
+<span class="file-link" data-testid="file-link">
+    @if (!CanDownload)
+    {
+        <span class="muted" data-testid="file-metadata-only">Metadata only (no download for your role)</span>
+    }
+    else if (_link is not null && _link.ExpiresAt > Clock.GetUtcNow())
+    {
+        <a href="@_link.Url" target="_blank" rel="noopener" data-enhance-nav="false" data-testid="file-download">Open @FileName<span class="visually-hidden"> (opens in a new tab)</span></a>
+        <span class="muted"> · link expires @Ui.Utc(_link.ExpiresAt)</span>
+    }
+    else
+    {
+        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="IssueAsync" data-testid="file-issue">
+            @(_link is null ? "Get download link" : "Regenerate link")<span class="visually-hidden"> for @FileName</span>
+        </button>
+    }
+    @if (Problem is not null)
+    {
+        <span class="field__error" role="alert">@Problem.Title</span>
+    }
+</span>
+
+@code {
+    [Parameter, EditorRequired] public Guid AttachmentId { get; set; }
+    [Parameter, EditorRequired] public string FileName { get; set; } = "";
+    [Parameter] public bool CanDownload { get; set; } = true;
+
+    private SignedLink? _link;
+
+    protected override void OnInitialized() => Loading = false;
+
+    private Task IssueAsync() => RunAsync(async actor => _link = await Files.IssueLinkAsync(actor, AttachmentId));
+}

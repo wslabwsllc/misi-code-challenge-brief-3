@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Cross-platform developer command runner: dotnet run (project tools/Dev) followed by a command.
+       BCL only (no NuGet packages), so it restores and runs before anything else is installed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Dev</RootNamespace>
+    <AssemblyName>Dev</AssemblyName>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,354 @@
+@page "/information-requests"
+@attribute [Authorize(Policy = Cap.TrackInformationRequests)]
+@rendermode InteractiveServer
+@inherits DecisionPage
+@using EventPermits.Application.Services
+@inject ReviewService ReviewSvc
+@inject CaseService CaseSvc
+
+<PageTitle>Information Requests · Memorial Event Operations</PageTitle>
+<PageHeader Title="Request Information Inbox"
+            Lead="@(CanRespond ? "Questions reviewers asked about your applications. Answer each request, attach documents if needed, then resubmit the application." : "Information requests sent to coordinators, with due dates and overdue flags. Answered cases return to the review queue when resubmitted.")" />
+<LiveRegion Message="@Announcement" />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+<nav class="views" aria-label="Filter requests">
+    <ul>
+        @foreach (var (view, label, count) in Views)
+        {
+            <li>
+                <a href="@ViewUrl(view)" class="views__link" aria-current="@(view == CurrentView ? "page" : null)" data-testid="view-@view.ToString().ToLowerInvariant()">
+                    @label <span class="views__count">@(count?.ToString("N0", Ui.Culture) ?? "…")</span>
+                </a>
+            </li>
+        }
+    </ul>
+</nav>
+
+@if (_selected is not null)
+{
+    var r = _selected;
+    <section class="card respond" aria-labelledby="respond-title" data-testid="respond-panel">
+        <div class="row row--between">
+            <h2 id="respond-title" tabindex="-1">Respond to the request on @r.Reference</h2>
+            <a class="btn btn--small" href="@ViewUrl(CurrentView)" data-testid="respond-close">Close</a>
+        </div>
+        <dl class="dl">
+            <dt>Missing items</dt>
+            <dd><ul class="items">@foreach (var item in r.MissingItems) { <li>@item</li> }</ul></dd>
+            @if (!string.IsNullOrWhiteSpace(r.Message))
+            {
+                <dt>Message</dt><dd>@r.Message</dd>
+            }
+            <dt>Asked by</dt><dd>@r.RequestedByName on @Ui.Utc(r.RequestedAt)</dd>
+            <dt>Due</dt><dd>@DueText(r)</dd>
+        </dl>
+        @if (IsConflict && ConflictRows is not null)
+        {
+            <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="RespondAsync" />
+        }
+        <form class="form" @onsubmit="RespondAsync" novalidate data-testid="respond-form">
+            <div class="field">
+                <label for="response">Your response</label>
+                <textarea id="response" @bind="_response" aria-invalid="@Invalid("response")" aria-describedby="@Describe("response", "response", hint: true)" data-testid="response-text"></textarea>
+                <span class="field__hint" id="response-hint">Answer every item listed above (5 to 2,000 characters). Answers cannot be edited afterwards.</span>
+                <FieldError Problem="Problem" Field="response" Id="response" />
+            </div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="response-file">Supporting document (optional)</label>
+                    <InputFile id="response-file" OnChange="FileChosen" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                               aria-invalid="@Invalid("file")" aria-describedby="@Describe("file", "response-file", hint: true)" data-testid="response-file" />
+                    <span class="field__hint" id="response-file-hint">PDF, PNG or JPG, up to 5 MiB.@(_file is null ? "" : $" Selected: {_file.Name} ({_file.Size:N0} bytes).")</span>
+                    <FieldError Problem="Problem" Field="file" Id="response-file" />
+                </div>
+                <div class="field">
+                    <label for="response-doctype">Document type</label>
+                    <select id="response-doctype" @bind="_docType" aria-invalid="@Invalid("documentType")" aria-describedby="@Describe("documentType", "response-doctype")" data-testid="response-doctype">
+                        @foreach (var t in Enum.GetValues<DocumentType>())
+                        {
+                            <option value="@t">@DocName(t)</option>
+                        }
+                    </select>
+                    <FieldError Problem="Problem" Field="documentType" Id="response-doctype" />
+                </div>
+            </div>
+            <div class="row">
+                <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="respond-submit">Send response</button>
+            </div>
+        </form>
+    </section>
+}
+
+@if (Loading && _rows is null)
+{
+    <p role="status">Loading requests…</p>
+}
+else if (_rows is { Count: 0 })
+{
+    <EmptyState Title="@EmptyTitle">
+        <p>@EmptyHint</p>
+    </EmptyState>
+}
+else if (_rows is not null)
+{
+    <div class="card card--flush">
+        <div class="table-wrap">
+            <table class="table table--cards" data-testid="inbox-table">
+                <caption>@Ui.Plural(_total, "request", "requests") · sorted by status, then due date (earliest first)</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Case</th>
+                        <th scope="col">Missing items</th>
+                        <th scope="col">Requested</th>
+                        <th scope="col">Due</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Response</th>
+                        <th scope="col"><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _rows)
+                    {
+                        <tr data-testid="inbox-row" data-reference="@r.Reference" class="@(r.Id == RequestId ? "is-selected" : null)">
+                            <td data-label="Case"><a href="/applications/@r.ApplicationId"><strong>@r.Reference</strong></a><br /><span class="muted">@r.ApplicantName</span></td>
+                            <td data-label="Missing items"><ul class="items">@foreach (var item in r.MissingItems) { <li>@item</li> }</ul></td>
+                            <td data-label="Requested">@r.RequestedByName<br /><span class="muted">@Ui.Utc(r.RequestedAt)</span></td>
+                            <td data-label="Due">
+                                @r.DueDate.ToString("ddd d MMM yyyy", Ui.Culture)
+                                @if (r.Overdue)
+                                {
+                                    <br /><span class="chip chip--bad" data-testid="overdue-flag">Overdue</span>
+                                }
+                                else if (r.Status == InformationRequestStatus.Open)
+                                {
+                                    <br /><span class="muted">@DueText(r)</span>
+                                }
+                            </td>
+                            <td data-label="Status">
+                                <span class="chip @(r.Status == InformationRequestStatus.Open ? "chip--attention" : "chip--good")" data-testid="request-status">@(r.Status == InformationRequestStatus.Open ? "Open" : "Answered")</span>
+                                <br /><span class="muted">Case:</span> <StatusChip Status="r.CaseStatus" />
+                            </td>
+                            <td data-label="Response">
+                                @if (r.ResponseText is null)
+                                {
+                                    <span class="muted">Not answered yet</span>
+                                }
+                                else
+                                {
+                                    <p class="response">@r.ResponseText</p>
+                                    <span class="muted">@(r.RespondedAt is { } at ? Ui.Utc(at) : "")</span>
+                                    @if (_files.TryGetValue(r.Id, out var files))
+                                    {
+                                        <ul class="items">
+                                            @foreach (var f in files)
+                                            {
+                                                <li>@f.FileName <FileLink AttachmentId="f.Id" FileName="@f.FileName" CanDownload="f.CanDownload" /></li>
+                                            }
+                                        </ul>
+                                    }
+                                }
+                            </td>
+                            <td data-label="Actions">
+                                <div class="actions">
+                                    @if (CanRespond && r.Status == InformationRequestStatus.Open && r.CaseStatus == CaseStatus.NeedsInformation)
+                                    {
+                                        <a class="btn btn--small btn--primary" href="@RespondUrl(r.Id)" data-testid="respond-open">Respond<span class="visually-hidden"> to @r.Reference</span></a>
+                                    }
+                                    @if (CanRespond && r.Status == InformationRequestStatus.Answered && r.CaseStatus == CaseStatus.NeedsInformation)
+                                    {
+                                        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ResubmitAsync(r)" data-testid="resubmit">Resubmit application<span class="visually-hidden"> @r.Reference</span></button>
+                                    }
+                                    @if (!CanRespond)
+                                    {
+                                        <a class="btn btn--small" href="/applications/@r.ApplicationId">Open case<span class="visually-hidden"> @r.Reference</span></a>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <Pager Page="PageNumber" Total="_total" OnPage="GoToPage" />
+    </div>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "view")] public string? ViewParam { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+    [SupplyParameterFromQuery(Name = "request")] public Guid? RequestId { get; set; }
+
+    private IReadOnlyList<InboxRow>? _rows;
+    private int _total;
+    private InboxCounts? _counts;
+    private IReadOnlyDictionary<Guid, IReadOnlyList<AttachmentView>> _files = new Dictionary<Guid, IReadOnlyList<AttachmentView>>();
+    private InboxRow? _selected;
+    private Guid? _openedRequest;
+
+    private string? _response;
+    private IBrowserFile? _file;
+    private DocumentType _docType = DocumentType.Other;
+
+    private bool CanRespond => Me?.Can(Cap.RespondToRequests) == true;
+    private int PageNumber => Math.Max(1, PageParam ?? 1);
+    private InboxView CurrentView => Enum.TryParse<InboxView>(ViewParam, true, out var v) ? v : InboxView.Open;
+
+    private IEnumerable<(InboxView View, string Label, int? Count)> Views =>
+    [
+        (InboxView.Open, "Open", _counts?.Open),
+        (InboxView.Overdue, "Overdue", _counts?.Overdue),
+        (InboxView.Answered, "Answered", _counts?.Answered),
+        (InboxView.All, "All", _counts?.All),
+    ];
+
+    private string EmptyTitle => CurrentView switch
+    {
+        InboxView.Overdue => "Nothing is overdue",
+        InboxView.Answered => "No answered requests yet",
+        InboxView.All => "No information requests",
+        _ => "No open information requests",
+    };
+
+    private string EmptyHint => CanRespond
+        ? "When a reviewer needs more information about one of your applications, the request appears here with its due date."
+        : "Requests appear here when a reviewer asks a coordinator for missing items from the review queue.";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!RendererInfo.IsInteractive) return;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (Problem?.StatusCode != 409) Problem = null;
+        await LoadAsync(async actor =>
+        {
+            _counts = await ReviewSvc.InboxCountsAsync(actor);
+            (_rows, _total) = await ReviewSvc.InboxAsync(actor, CurrentView, PageNumber);
+            _files = await ReviewSvc.ResponseFilesAsync(actor, _rows.Where(r => r.Status == InformationRequestStatus.Answered).Select(r => r.Id).ToList());
+            var selected = RequestId is { } id && actor.Can(Cap.RespondToRequests) ? _rows.FirstOrDefault(r => r.Id == id && r.Status == InformationRequestStatus.Open) : null;
+            if (selected is null && RequestId is { } rid && actor.Can(Cap.RespondToRequests))
+            {
+                // The request may be on another page or filter: look it up among the caller's open requests.
+                var (open, _) = await ReviewSvc.InboxAsync(actor, InboxView.Open, 1);
+                selected = open.FirstOrDefault(r => r.Id == rid);
+            }
+            if (selected?.Id != _openedRequest)
+            {
+                _response = null;
+                _file = null;
+                _docType = DocumentType.Other;
+                ConflictRows = null;
+                if (selected is not null) FocusAfterRender("#respond-title");
+            }
+            _selected = selected;
+            _openedRequest = selected?.Id;
+        });
+    }
+
+    private string ViewUrl(InboxView view) => Nav.GetUriWithQueryParameters("/information-requests", new Dictionary<string, object?>
+    {
+        ["view"] = view == InboxView.Open ? null : view.ToString().ToLowerInvariant(),
+    });
+
+    private string RespondUrl(Guid requestId) => Nav.GetUriWithQueryParameters("/information-requests", new Dictionary<string, object?>
+    {
+        ["view"] = ViewParam, ["page"] = PageParam, ["request"] = requestId,
+    });
+
+    private void GoToPage(int page) => Nav.NavigateTo(Nav.GetUriWithQueryParameter("page", page));
+
+    private string DueText(InboxRow r)
+    {
+        if (r.Status != InformationRequestStatus.Open) return r.DueDate.ToString("ddd d MMM yyyy", Ui.Culture);
+        var days = r.DueDate.DayNumber - DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime).DayNumber;
+        return days switch
+        {
+            < 0 => $"Overdue by {Ui.Plural(-days, "day", "days")}",
+            0 => "Due today",
+            _ => $"Due in {Ui.Plural(days, "day", "days")}",
+        };
+    }
+
+    private void FileChosen(InputFileChangeEventArgs e)
+    {
+        _file = e.File;
+        if (Problem?.For("file").Length > 0) Problem = null;
+    }
+
+    private async Task RespondAsync()
+    {
+        if (_selected is null) return;
+        var checks = new FieldChecks()
+            .Text("response", _response, 5, 2000, "Response")
+            .Require(_file is null || _file.Size <= Limits.MaxAttachmentBytes, "file", $"The file is larger than 5 MiB ({Limits.MaxAttachmentBytes:N0} bytes).")
+            .Require(_file is null || _file.Size > 0, "file", "The file is empty.");
+        if (ClientInvalid(checks)) return;
+
+        var request = _selected;
+        var file = _file;
+        var type = _docType;
+        var text = _response;
+        var ok = await RunAsync(async actor =>
+        {
+            var version = request.CaseVersion;
+            if (file is not null)
+            {
+                using var buffer = new MemoryStream();
+                await using (var stream = file.OpenReadStream(Limits.MaxAttachmentBytes))
+                    await stream.CopyToAsync(buffer);
+                var uploaded = await CaseSvc.UploadDocumentAsync(actor, request.ApplicationId, version, type, new UploadFile(file.Name, file.ContentType, buffer.ToArray()), request.Id);
+                version = uploaded.Version;
+            }
+            await ReviewSvc.RespondAsync(actor, request.Id, version, text);
+        }, $"Response to {request.Reference} recorded{(file is null ? "" : $" with {file.Name}")}. Resubmit the application once every open request is answered.");
+        if (ok)
+        {
+            ConflictRows = null;
+            Nav.NavigateTo(ViewUrl(CurrentView));
+        }
+        else if (IsConflict)
+        {
+            await BuildConflictAsync(request);
+        }
+    }
+
+    private async Task BuildConflictAsync(InboxRow mine)
+    {
+        InboxRow? saved = null;
+        try
+        {
+            var actor = await GetActorAsync();
+            var (all, _) = await ReviewSvc.InboxAsync(actor, InboxView.Open, 1);
+            saved = all.FirstOrDefault(r => r.Id == mine.Id);
+        }
+        catch (AppException)
+        {
+            // keep saved null
+        }
+        ConflictRows =
+        [
+            new("Case status", saved is null ? "changed (request no longer open)" : Workflow.Display(saved.CaseStatus), Workflow.Display(mine.CaseStatus)),
+            new("Record version", saved?.CaseVersion.ToString(), mine.CaseVersion.ToString()),
+            new("Your response", null, _response),
+        ];
+        if (saved is not null) _selected = saved; // re-apply uses the saved version
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        Problem = null;
+        ConflictRows = null;
+        _openedRequest = null;
+        await ReloadAsync();
+    }
+
+    private async Task ResubmitAsync(InboxRow row)
+    {
+        var ok = await RunAsync(async actor => await ReviewSvc.ResubmitAsync(actor, row.ApplicationId, row.CaseVersion),
+            $"{row.Reference} resubmitted (T3). It is back in the eligibility review queue.");
+        if (ok) await ReloadAsync();
+    }
+}

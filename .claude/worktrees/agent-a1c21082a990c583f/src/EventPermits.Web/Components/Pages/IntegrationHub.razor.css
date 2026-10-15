@@ -1,0 +1,34 @@
+.hub-cards { list-style: none; margin: 0 0 var(--space-5); padding: 0; display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.hub-card { margin: 0 !important; padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; border-top: 4px solid var(--line-strong); }
+.hub-card--healthy { border-top-color: var(--ok); }
+.hub-card--degraded { border-top-color: var(--warn); }
+.hub-card--offline { border-top-color: var(--danger); }
+.hub-card__head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-2); }
+.hub-card__head h3 { margin: 0; }
+.hub-card__reason { margin: 0; color: var(--ink-muted); font-size: .9rem; }
+.hub-card__actions { margin-top: auto; padding-top: var(--space-2); }
+.hub-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-3); margin: 0; font-size: .88rem; }
+.hub-facts div { min-width: 0; }
+.hub-facts dt { color: var(--ink-muted); font-size: .8rem; }
+.hub-facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.hub-config summary, .hub-errors summary, .hub-endpoints summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; color: var(--brand); font-weight: 600; font-size: .9rem; }
+.hub-config__dl { font-size: .85rem; }
+.hub-wrap { overflow-wrap: anywhere; word-break: break-word; }
+.hub-errors ul, .hub-endpoints ul { list-style: none; margin: 0; padding: 0; font-size: .85rem; }
+.hub-errors li { display: grid; padding: var(--space-1) 0; border-top: 1px solid var(--line); }
+.hub-errors a { min-height: 28px; display: inline-flex; align-items: center; }
+.hub-test { margin: 0; font-size: .9rem; overflow-wrap: anywhere; }
+
+.hub-section-head { padding: var(--space-4) var(--space-4) 0; }
+.hub-section-head h2 { margin: 0 0 var(--space-1); }
+.hub-pad { padding: var(--space-4); }
+.hub-mode { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.hub-mode select { width: auto; min-width: 150px; flex: 1 1 150px; }
+.hub-mode .field__error { flex-basis: 100%; }
+.hub-attempts { margin-top: var(--space-4) !important; }
+.hub-filters { margin: var(--space-3) var(--space-4); }
+
+@media (max-width: 720px) {
+  .hub-cards { grid-template-columns: 1fr; }
+  .hub-mode select { min-width: 0; }
+}

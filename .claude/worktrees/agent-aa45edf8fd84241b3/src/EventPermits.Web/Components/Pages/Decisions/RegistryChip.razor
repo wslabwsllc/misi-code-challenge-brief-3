@@ -1,0 +1,26 @@
+@* Registry evidence as text (colour only reinforces it). *@
+<span class="chip @Css" data-testid="registry-chip" data-outcome="@Text">@Text</span>
+
+@code {
+    [Parameter] public VerificationOutcome? Outcome { get; set; }
+    [Parameter] public RegistryEligibility? Eligibility { get; set; }
+
+    private string Text => (Outcome, Eligibility) switch
+    {
+        (null, _) => "Not verified",
+        (VerificationOutcome.Pending, _) => "Pending",
+        (VerificationOutcome.NotFound, _) => "Not found",
+        (_, RegistryEligibility.Valid) => "Valid",
+        (_, RegistryEligibility.Flagged) => "Flagged",
+        (_, RegistryEligibility.Unknown) => "Unknown",
+        _ => "Matched",
+    };
+
+    private string Css => Text switch
+    {
+        "Valid" => "chip--good",
+        "Flagged" or "Not found" => "chip--bad",
+        "Unknown" or "Pending" => "chip--attention",
+        _ => "chip--outline",
+    };
+}

@@ -1,0 +1,40 @@
+@using EventPermits.Application.Services
+@* Staff readiness checklist of one event (E8-01 AC3). Only the assigned attendant ticks items; everyone else sees who did what and when. *@
+@if (Items.Count == 0)
+{
+    <p class="muted" data-testid="readiness-empty">No checklist yet: the items are created when the permit is issued.</p>
+}
+else
+{
+    <fieldset class="readiness" data-testid="readiness">
+        <legend>Readiness checklist · @Items.Count(i => i.Done) of @Items.Count done</legend>
+        @if (!CanEdit)
+        {
+            <p class="field__hint" id="readiness-hint-@Key">@ReadOnlyReason</p>
+        }
+        <ul class="readiness__list">
+            @foreach (var item in Items)
+            {
+                var id = $"ready-{Key}-{item.Id:N}";
+                <li class="readiness__item @(item.Done ? "is-done" : null)">
+                    <input type="checkbox" id="@id" checked="@item.Done" disabled="@(!CanEdit || Busy)"
+                           aria-describedby="@(CanEdit ? null : $"readiness-hint-{Key}")"
+                           @onchange="e => OnToggle.InvokeAsync((item.Id, e.Value is true))" data-testid="readiness-item" />
+                    <label for="@id">
+                        <span>@item.Label</span>
+                        <span class="readiness__meta">@(item.Done ? $"Done by {item.DoneBy} at {Ui.Utc(item.DoneAt!.Value)}" : "Not done")</span>
+                    </label>
+                </li>
+            }
+        </ul>
+    </fieldset>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<ReadinessView> Items { get; set; } = [];
+    [Parameter] public bool CanEdit { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public string ReadOnlyReason { get; set; } = "Read-only: only the attendant assigned to this event ticks the checklist.";
+    [Parameter] public string Key { get; set; } = "x";
+    [Parameter] public EventCallback<(Guid Id, bool Done)> OnToggle { get; set; }
+}

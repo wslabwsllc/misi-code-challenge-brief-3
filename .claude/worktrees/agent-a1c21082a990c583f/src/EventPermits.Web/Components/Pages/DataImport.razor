@@ -1,0 +1,464 @@
+@page "/integrations/imports"
+@attribute [Authorize(Policy = Cap.ManageImports)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject PartnerImportService Imports
+
+<PageTitle>Data Import & Reconciliation · Memorial Event Operations</PageTitle>
+<PageHeader Title="Data Import & Reconciliation" Lead="Partner roster CSV files from the drop folder (an SFTP simulation) or uploaded here. Bad rows are rejected with reasons, good rows are imported, and re-importing the same file changes nothing." />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" />
+
+<div class="imp-top">
+    <section class="card" aria-labelledby="imp-upload-title" data-testid="import-upload">
+        <h2 id="imp-upload-title">Upload a CSV</h2>
+        <p class="muted">Columns: <code>@string.Join(",", PartnerImportService.Columns)</code>. Times are ISO-8601 UTC ending in Z. Choosing a file shows a preview; nothing is saved until you import.</p>
+        <div class="field">
+            <label for="imp-file">Partner CSV file</label>
+            <InputFile id="imp-file" accept=".csv,text/csv" OnChange="FileChosenAsync" aria-invalid="@FileInvalid" aria-describedby="imp-file-hint imp-file-error" data-testid="import-file" />
+            <span id="imp-file-hint" class="field__hint">Up to 2 MB.</span>
+            <span id="imp-file-error" class="field__error" data-testid="import-file-error">@FileError</span>
+        </div>
+    </section>
+
+    <section class="card" aria-labelledby="imp-drop-title" data-testid="import-drop">
+        <h2 id="imp-drop-title">Drop folder</h2>
+        <p class="muted">Files under <code>@PartnerImportService.DropPrefix</code> are imported nightly and on demand. Files already imported are skipped.</p>
+        @if (_dropFiles.Count == 0)
+        {
+            <p data-testid="import-drop-empty">The drop folder is empty.</p>
+        }
+        else
+        {
+            <ul class="imp-files" role="list" data-testid="import-drop-files">
+                @foreach (var f in _dropFiles.Take(8))
+                {
+                    <li><span class="mono">@f.Key.Replace(PartnerImportService.DropPrefix, "")</span> <span class="muted">@((f.Size / 1024.0).ToString("0.0", Ui.Culture)) KB · @Ui.Utc(f.LastModified)</span></li>
+                }
+            </ul>
+            @if (_dropFiles.Count > 8)
+            {
+                <p class="muted">and @(_dropFiles.Count - 8) more.</p>
+            }
+        }
+        <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="FetchAsync" data-testid="import-fetch">Fetch from drop folder</button>
+
+        @if (Me?.Can(Cap.ManageIntegrations) == true)
+        {
+            <form class="imp-mock" @onsubmit="DropMockAsync" @onsubmit:preventDefault novalidate>
+                <div class="field">
+                    <label for="imp-mock-kind">Ask the partner mock to drop a file</label>
+                    <select id="imp-mock-kind" @bind="_mockKind" aria-invalid="@(_mockError is null ? null : "true")" aria-describedby="imp-mock-error" data-testid="import-mock-kind">
+                        <option value="">Choose a file type</option>
+                        @foreach (var (value, label) in MockKinds)
+                        {
+                            <option value="@value">@label</option>
+                        }
+                    </select>
+                    <span id="imp-mock-error" class="field__error">@_mockError</span>
+                </div>
+                <button type="submit" class="btn" disabled="@Busy" data-testid="import-mock-drop">Drop test file</button>
+            </form>
+        }
+    </section>
+</div>
+
+@if (_preview is not null)
+{
+    <section class="card imp-preview" aria-labelledby="imp-preview-title" data-testid="import-preview">
+        <div class="imp-head">
+            <h2 id="imp-preview-title">Preview: @_preview.FileName</h2>
+            <span class="chip @(_preview.HeaderValid ? "chip--good" : "chip--bad")" data-testid="import-header-state">@(_preview.HeaderValid ? "Header matches" : "Header invalid")</span>
+        </div>
+        <dl class="imp-facts">
+            <div><dt>Rows</dt><dd data-testid="import-preview-rows">@_preview.TotalRows.ToString("N0", Ui.Culture)</dd></div>
+            <div><dt>Rows with errors (first 20)</dt><dd>@_preview.Rows.Count(r => r.Error is not null)</dd></div>
+            <div><dt>SHA-256 checksum</dt><dd class="mono imp-wrap">@_preview.Checksum</dd></div>
+        </dl>
+        <h3>Column mapping</h3>
+        <ul class="imp-diag" data-testid="import-diagnostics">
+            @foreach (var diag in _preview.Diagnostics)
+            {
+                <li>@diag</li>
+            }
+        </ul>
+        @if (_preview.AlreadyImported)
+        {
+            <div class="alert alert--info" data-testid="import-already">
+                <p><strong>This exact file was imported before.</strong> Importing it again records a duplicate batch and changes nothing, unless you choose to re-process it.</p>
+            </div>
+        }
+        @if (_preview.Rows.Count > 0)
+        {
+            <div class="table-wrap">
+                <table class="table table--compact table--cards" data-testid="import-preview-table">
+                    <caption>First @_preview.Rows.Count row(s) with their validation result</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col" class="num">Row</th>
+                            @foreach (var h in PartnerImportService.Columns)
+                            {
+                                <th scope="col">@h</th>
+                            }
+                            <th scope="col">Validation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _preview.Rows)
+                        {
+                            <tr class="@(r.Error is null ? null : "imp-row--bad")">
+                                <td data-label="Row" class="num">@r.Number</td>
+                                @for (var i = 0; i < PartnerImportService.Columns.Length; i++)
+                                {
+                                    <td data-label="@PartnerImportService.Columns[i]" class="imp-wrap">@(i < r.Cells.Count ? r.Cells[i] : "")</td>
+                                }
+                                <td data-label="Validation">@if (r.Error is null) { <span class="chip chip--good">OK</span> } else { <span class="chip chip--bad">Rejected</span> <span>@r.Error</span> }</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <form class="row imp-commit" @onsubmit="ImportAsync" @onsubmit:preventDefault novalidate>
+            <label class="check" for="imp-replay"><input id="imp-replay" type="checkbox" @bind="_replay" data-testid="import-replay" /> Re-process even if this file was imported before</label>
+            <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="import-commit">Import this file</button>
+            <button type="button" class="btn btn--quiet" @onclick="ClearPreview">Discard preview</button>
+        </form>
+    </section>
+}
+
+@if (_detail is { } d)
+{
+    var b = d.Batch;
+    <section class="card imp-detail" aria-labelledby="imp-detail-title" data-testid="import-batch-detail">
+        <div class="imp-head">
+            <h2 id="imp-detail-title">Batch @b.BatchId</h2>
+            <span class="chip @StatusClass(b.Status)" data-testid="import-batch-status">@Display(b.Status)</span>
+        </div>
+        <dl class="imp-facts">
+            <div><dt>Source</dt><dd>@b.Source@(b.IsReplay ? " (replay)" : "")</dd></div>
+            <div><dt>File</dt><dd class="mono imp-wrap">@b.FileName</dd></div>
+            <div><dt>Read</dt><dd>@b.RowsRead</dd></div>
+            <div><dt>Inserted</dt><dd data-testid="import-batch-inserted">@b.Inserted</dd></div>
+            <div><dt>Updated</dt><dd>@b.UpdatedRows</dd></div>
+            <div><dt>Unchanged</dt><dd>@b.UnchangedRows</dd></div>
+            <div><dt>Rejected</dt><dd data-testid="import-batch-rejected">@b.Rejected</dd></div>
+            <div><dt>Completed</dt><dd>@(b.CompletedAt is { } c ? Ui.Utc(c) : "Running")</dd></div>
+            <div class="imp-span"><dt>Checksum</dt><dd class="mono imp-wrap">@b.Checksum</dd></div>
+        </dl>
+        @if (b.MappingDiagnostics.Count > 0)
+        {
+            <ul class="imp-diag">
+                @foreach (var m in b.MappingDiagnostics)
+                {
+                    <li>@m</li>
+                }
+            </ul>
+        }
+        <div class="row">
+            @if (d.Errors.Count > 0)
+            {
+                <a class="btn btn--small" href="@($"/api/imports/{b.Id}/errors.csv")" download data-testid="import-error-csv">Download error report (CSV)</a>
+            }
+            @if (b.Source == "drop-folder")
+            {
+                <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ReplayAsync(b.Id)" data-testid="import-replay-batch">Replay this file</button>
+            }
+            <button type="button" class="btn btn--small btn--quiet" @onclick="CloseDetail">Close batch</button>
+        </div>
+        @if (d.Errors.Count == 0)
+        {
+            <p class="muted imp-gap">No rejected rows.</p>
+        }
+        else
+        {
+            <div class="table-wrap imp-gap">
+                <table class="table table--compact table--cards" data-testid="import-row-errors">
+                    <caption>Rejected rows</caption>
+                    <thead><tr><th scope="col" class="num">Row</th><th scope="col">Reason</th><th scope="col">Raw line</th></tr></thead>
+                    <tbody>
+                        @foreach (var e in d.Errors)
+                        {
+                            <tr>
+                                <td data-label="Row" class="num">@e.RowNumber</td>
+                                <td data-label="Reason">@e.Error</td>
+                                <td data-label="Raw line" class="mono imp-wrap">@e.RawLine</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+<section class="card card--flush imp-section" aria-labelledby="imp-batches-title" data-testid="import-batches">
+    <div class="imp-section__head">
+        <h2 id="imp-batches-title">Import batches</h2>
+        <p class="muted" data-testid="import-last-sync">@(_lastSync is { } ls ? $"Last completed sync {Ui.Utc(ls)}." : "No completed sync yet.")</p>
+    </div>
+    @if (_batches.Count == 0)
+    {
+        <div class="imp-pad"><EmptyState Title="No batches yet">
+            <p>Upload a file or fetch from the drop folder.</p>
+        </EmptyState></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact">
+                <caption class="visually-hidden">Import batches, newest first</caption>
+                <thead><tr><th scope="col">Batch</th><th scope="col">Status</th><th scope="col">Source</th><th scope="col" class="num">Read</th><th scope="col" class="num">New</th><th scope="col" class="num">Updated</th><th scope="col" class="num">Unchanged</th><th scope="col" class="num">Rejected</th><th scope="col">Started</th><th scope="col">Checksum</th></tr></thead>
+                <tbody>
+                    @foreach (var b in _batches)
+                    {
+                        <tr data-testid="import-batch-row">
+                            <td data-label="Batch"><button type="button" class="btn btn--small btn--quiet imp-link" @onclick="() => OpenBatchAsync(b.Id)" data-testid="import-batch-open">@b.BatchId</button></td>
+                            <td data-label="Status"><span class="chip @StatusClass(b.Status)">@Display(b.Status)</span></td>
+                            <td data-label="Source">@b.Source@(b.IsReplay ? " (replay)" : "")</td>
+                            <td data-label="Read" class="num">@b.RowsRead</td>
+                            <td data-label="New" class="num">@b.Inserted</td>
+                            <td data-label="Updated" class="num">@b.UpdatedRows</td>
+                            <td data-label="Unchanged" class="num">@b.UnchangedRows</td>
+                            <td data-label="Rejected" class="num">@b.Rejected</td>
+                            <td data-label="Started">@Ui.Utc(b.StartedAt)</td>
+                            <td data-label="Checksum" class="mono">@b.Checksum[..Math.Min(12, b.Checksum.Length)]…</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <Pager Page="_page" Total="_total" OnPage="PageAsync" />
+    }
+</section>
+
+<section class="card card--flush imp-section" aria-labelledby="imp-events-title" data-testid="import-partner-events">
+    <div class="imp-section__head">
+        <h2 id="imp-events-title">Partner events and reconciliation</h2>
+        <p class="muted">Imported partner events, checked against active reservations at the same venue (including set-up and tear-down buffers).</p>
+    </div>
+    @if (_events.Count == 0)
+    {
+        <div class="imp-pad"><EmptyState Title="No partner events imported" /></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact">
+                <caption class="visually-hidden">Partner events with reservation conflicts</caption>
+                <thead><tr><th scope="col">Partner event</th><th scope="col">Site</th><th scope="col">Window (UTC)</th><th scope="col" class="num">Attendees</th><th scope="col">Updated at source</th><th scope="col">Reconciliation</th></tr></thead>
+                <tbody>
+                    @foreach (var e in _events)
+                    {
+                        <tr>
+                            <td data-label="Partner event" class="mono">@e.PartnerEventId</td>
+                            <td data-label="Site">@e.SiteCode</td>
+                            <td data-label="Window (UTC)">@Ui.Utc(e.StartUtc) – @e.EndUtc.UtcDateTime.ToString("HH:mm", Ui.Culture)</td>
+                            <td data-label="Attendees" class="num">@e.AttendeeCount</td>
+                            <td data-label="Updated at source">@Ui.Utc(e.UpdatedAtUtc)</td>
+                            <td data-label="Reconciliation">
+                                @if (e.ConflictingReservations.Count == 0)
+                                {
+                                    <span class="chip chip--good">No conflict</span>
+                                }
+                                else
+                                {
+                                    <span class="chip chip--bad">Conflicts</span> <span>@string.Join(", ", e.ConflictingReservations)</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    private const long MaxRead = 4 * 1024 * 1024;
+    private static readonly (string Value, string Label)[] MockKinds =
+    [
+        ("clean", "Clean file"), ("bad_rows", "File with bad rows"), ("duplicate", "Duplicate of the last file"),
+        ("updated", "File with updated rows"), ("malformed_header", "File with a malformed header"),
+    ];
+
+    [SupplyParameterFromQuery(Name = "batch")] public string? BatchQuery { get; set; }
+
+    private IReadOnlyList<StoredObjectInfo> _dropFiles = [];
+    private IReadOnlyList<ImportBatch> _batches = [];
+    private IReadOnlyList<PartnerEventRow> _events = [];
+    private int _total;
+    private int _page = 1;
+    private DateTimeOffset? _lastSync;
+    private ImportPreview? _preview;
+    private byte[]? _content;
+    private string? _fileName;
+    private bool _replay;
+    private string _mockKind = "";
+    private string? _mockError;
+    private string? _localFileError;
+    private (ImportBatch Batch, IReadOnlyList<ImportRowError> Errors)? _detail;
+
+    private string? FileError => _localFileError ?? (Problem?.For("file") is { Length: > 0 } e ? string.Join(" ", e) : null);
+    private string? FileInvalid => FileError is null ? null : "true";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadAsync(async actor =>
+        {
+            await LoadListsAsync(actor);
+            if (Guid.TryParse(BatchQuery, out var id) && _detail?.Batch.Id != id) _detail = await Imports.BatchAsync(actor, id);
+        });
+    }
+
+    private async Task LoadListsAsync(Actor actor)
+    {
+        _dropFiles = await Imports.DropFilesAsync(actor);
+        (_batches, _total) = await Imports.BatchesAsync(actor, _page);
+        _events = await Imports.PartnerEventsAsync(actor);
+        _lastSync = _batches.Where(b => b.Status is ImportBatchStatus.Completed or ImportBatchStatus.CompletedWithErrors).Max(b => b.CompletedAt);
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await RunAsync(LoadListsAsync);
+    }
+
+    private async Task FileChosenAsync(InputFileChangeEventArgs e)
+    {
+        _localFileError = null;
+        _preview = null;
+        Problem = null;
+        var file = e.File;
+        if (file.Size > MaxRead)
+        {
+            _localFileError = "The file is larger than 4 MB and cannot be previewed. Partner files must be at most 2 MB.";
+            return;
+        }
+        using var buffer = new MemoryStream();
+        await using (var stream = file.OpenReadStream(MaxRead)) await stream.CopyToAsync(buffer);
+        _content = buffer.ToArray();
+        _fileName = file.Name;
+        _replay = false;
+        if (await RunAsync(async actor => _preview = await Imports.PreviewAsync(actor, file.Name, _content)))
+            Announcement = $"Preview ready: {_preview!.TotalRows} row(s), header {(_preview.HeaderValid ? "matches" : "invalid")}.";
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_content is null || _fileName is null) return;
+        _localFileError = null;
+        ImportBatch? batch = null;
+        var ok = await RunAsync(async actor =>
+        {
+            batch = await Imports.ImportUploadAsync(actor, _fileName, _content, _replay);
+            _page = 1;
+            await LoadListsAsync(actor);
+            _detail = await Imports.BatchAsync(actor, batch.Id);
+        });
+        if (ok && batch is not null)
+        {
+            Announcement = Summary(batch);
+            _preview = null;
+            _content = null;
+        }
+    }
+
+    private async Task FetchAsync()
+    {
+        IReadOnlyList<ImportBatch> created = [];
+        if (await RunAsync(async actor =>
+            {
+                created = await Imports.ImportDropFolderAsync(actor, "manual");
+                _page = 1;
+                await LoadListsAsync(actor);
+                if (created.Count > 0) _detail = await Imports.BatchAsync(actor, created[^1].Id);
+            }))
+        {
+            Announcement = created.Count == 0 ? "No new files in the drop folder." : $"Imported {created.Count} file(s). Last: {Summary(created[^1])}";
+        }
+    }
+
+    private async Task DropMockAsync()
+    {
+        _mockError = null;
+        if (string.IsNullOrEmpty(_mockKind))
+        {
+            _mockError = "Choose a file type.";
+            await Js.InvokeVoidAsync("eventPermits.focus", "#imp-mock-kind");
+            return;
+        }
+        string key = "";
+        if (await RunAsync(async actor =>
+            {
+                key = await Imports.DropMockFileAsync(actor, _mockKind);
+                _dropFiles = await Imports.DropFilesAsync(actor);
+            }))
+        {
+            Announcement = $"The partner mock dropped {key}. Use Fetch from drop folder to import it.";
+        }
+    }
+
+    private async Task ReplayAsync(Guid id)
+    {
+        ImportBatch? batch = null;
+        if (await RunAsync(async actor =>
+            {
+                batch = await Imports.ReplayAsync(actor, id);
+                _page = 1;
+                await LoadListsAsync(actor);
+                _detail = await Imports.BatchAsync(actor, batch.Id);
+            }) && batch is not null)
+        {
+            Announcement = "Replayed. " + Summary(batch);
+        }
+    }
+
+    private async Task OpenBatchAsync(Guid id)
+    {
+        if (await RunAsync(async actor => _detail = await Imports.BatchAsync(actor, id)))
+        {
+            Nav.NavigateTo($"/integrations/imports?batch={id}", replace: true);
+            await Js.InvokeVoidAsync("eventPermits.focus", "#imp-detail-title");
+        }
+    }
+
+    private void CloseDetail()
+    {
+        _detail = null;
+        Nav.NavigateTo("/integrations/imports", replace: true);
+    }
+
+    private async Task PageAsync(int page)
+    {
+        _page = page;
+        await RunAsync(LoadListsAsync);
+    }
+
+    private void ClearPreview()
+    {
+        _preview = null;
+        _content = null;
+    }
+
+    private static string Summary(ImportBatch b) => b.Status == ImportBatchStatus.Duplicate
+        ? $"Batch {b.BatchId}: identical to an earlier file, nothing changed."
+        : $"Batch {b.BatchId}: {b.Inserted} new, {b.UpdatedRows} updated, {b.UnchangedRows} unchanged, {b.Rejected} rejected.";
+
+    private static string Display(ImportBatchStatus s) => s switch
+    {
+        ImportBatchStatus.CompletedWithErrors => "Completed with errors",
+        _ => s.ToString(),
+    };
+
+    private static string StatusClass(ImportBatchStatus s) => s switch
+    {
+        ImportBatchStatus.Completed => "chip--good",
+        ImportBatchStatus.CompletedWithErrors => "chip--attention",
+        ImportBatchStatus.Failed => "chip--bad",
+        ImportBatchStatus.Duplicate => "chip--draft",
+        _ => "chip--progress",
+    };
+}

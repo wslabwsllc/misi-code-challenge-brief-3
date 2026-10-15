@@ -1,0 +1,26 @@
+.wx-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: end; }
+.wx-forecast { margin-bottom: var(--space-4); }
+.wx-forecast__head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.wx-forecast__head h2 { margin: 0; }
+.wx-severe {
+  display: grid; gap: var(--space-1); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4);
+  background: var(--danger-tint); color: var(--danger); border: 2px solid var(--danger); border-radius: var(--radius);
+}
+.wx-severe strong { font-size: 1.05rem; }
+.wx-severe span { color: var(--ink); }
+.wx-advisory { padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4); background: var(--warn-tint); color: var(--warn); border-left: 4px solid var(--warn); border-radius: var(--radius-sm); }
+.wx-figures { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin: 0 0 var(--space-3); }
+.wx-figures dt { color: var(--ink-muted); font-size: .85rem; }
+.wx-figures dd { margin: 0; font: 600 1.25rem/1.25 var(--font-head); overflow-wrap: anywhere; }
+.wx-times { font-size: .85rem; }
+.wx-ack { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.wx-ack h3 { margin-top: 0; }
+
+.wx-grid { display: grid; gap: var(--space-4); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.wx-grid > .card { margin: 0 !important; min-width: 0; }
+.wx-section-title { margin: 0; padding: var(--space-4) var(--space-4) var(--space-2); font-size: 1.12rem; }
+.wx-pad { padding: 0 var(--space-4) var(--space-4); }
+
+@media (max-width: 1100px) {
+  .wx-grid { grid-template-columns: 1fr; }
+}

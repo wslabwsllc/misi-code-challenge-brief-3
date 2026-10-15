@@ -1,0 +1,87 @@
+@* Signed, expiring download link for one attachment (A-16) with a visible countdown and Regenerate. *@
+@inherits CasesPage
+@implements IDisposable
+@using EventPermits.Application.Services
+@inject FileService Files
+
+@if (!Attachment.CanDownload)
+{
+    <span class="muted" data-testid="doc-metadata-only">Metadata only</span>
+}
+else
+{
+    <span class="doclink" data-testid="doc-link">
+        @if (_link is null)
+        {
+            <button type="button" class="btn btn--small" @onclick="IssueAsync" disabled="@Busy" data-testid="doc-link-issue">Get link<span class="visually-hidden"> for @Attachment.FileName</span></button>
+        }
+        else if (Remaining > TimeSpan.Zero)
+        {
+            <a href="@_link.Url" data-testid="doc-download">Download<span class="visually-hidden"> @Attachment.FileName</span></a>
+            <span class="muted doclink__timer" data-testid="doc-expiry">expires in @Remaining.ToString(@"m\:ss", Ui.Culture)</span>
+        }
+        else
+        {
+            <span class="muted" data-testid="doc-expired">Link expired</span>
+            <button type="button" class="btn btn--small" @onclick="IssueAsync" disabled="@Busy" data-testid="doc-link-regenerate">Regenerate link<span class="visually-hidden"> for @Attachment.FileName</span></button>
+        }
+        @if (Problem is not null)
+        {
+            <span class="field__error" role="alert">@Problem.Title</span>
+        }
+        <span class="visually-hidden" role="status">@Announcement</span>
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired] public AttachmentView Attachment { get; set; } = default!;
+    [Parameter] public EventCallback<SignedLink> OnIssued { get; set; }
+
+    private SignedLink? _link;
+    private CancellationTokenSource? _ticker;
+
+    private TimeSpan Remaining => _link is null ? TimeSpan.Zero : _link.ExpiresAt - Clock.GetUtcNow() is var r && r > TimeSpan.Zero ? r : TimeSpan.Zero;
+
+    protected override void OnInitialized() => Loading = false;
+
+    private async Task IssueAsync()
+    {
+        SignedLink? issued = null;
+        if (await RunAsync(async a => issued = await Files.IssueLinkAsync(a, Attachment.Id), null) && issued is not null)
+        {
+            _link = issued;
+            Announcement = $"Download link for {Attachment.FileName} ready. It expires in {Math.Max(1, (int)Math.Round(Remaining.TotalMinutes))} minutes.";
+            StartTicker();
+            await OnIssued.InvokeAsync(issued);
+        }
+    }
+
+    private void StartTicker()
+    {
+        _ticker?.Cancel();
+        _ticker = new CancellationTokenSource();
+        var token = _ticker.Token;
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(token))
+                {
+                    await InvokeAsync(StateHasChanged);
+                    if (Remaining <= TimeSpan.Zero) break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // component disposed or link regenerated
+            }
+        }, CancellationToken.None);
+    }
+
+    public void Dispose()
+    {
+        _ticker?.Cancel();
+        _ticker?.Dispose();
+    }
+}

@@ -1,0 +1,385 @@
+@page "/operations/roster"
+@attribute [Authorize(Policy = Cap.ViewRoster)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject OperationsService Ops
+
+<PageTitle>Daily Event Roster · Memorial Event Operations</PageTitle>
+<PageHeader Title="Daily Event Roster" Lead="@LeadText">
+    <Actions>
+        <button type="button" class="btn no-print" @onclick="PrintAsync" data-testid="roster-print">Print run-of-show</button>
+        <a class="btn btn--primary no-print" href="@PdfHref" target="_blank" rel="noopener" data-testid="roster-pdf">Download run-of-show PDF</a>
+    </Actions>
+</PageHeader>
+
+<form class="filters no-print" @onsubmit="ApplyFilters" @onsubmit:preventDefault data-testid="roster-filters" novalidate>
+    <div class="field">
+        <label for="roster-date">Date</label>
+        <input id="roster-date" type="date" @bind="_dateInput" required aria-invalid="@Invalid("date")" aria-describedby="@(Invalid("date") is null ? null : "roster-date-error")" data-testid="roster-date" />
+        @if (Problem?.For("date") is { Length: > 0 } dateErrors)
+        {
+            <p class="field__error" id="roster-date-error">@string.Join(" ", dateErrors)</p>
+        }
+    </div>
+    <div class="field">
+        <label for="roster-cemetery">Cemetery</label>
+        <select id="roster-cemetery" @bind="_cemeteryInput" data-testid="roster-cemetery">
+            <option value="">All cemeteries</option>
+            @foreach (var c in _cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="row">
+        <button type="submit" class="btn btn--primary" data-testid="roster-apply">Show roster</button>
+        <button type="button" class="btn" @onclick="GoToday" data-testid="roster-today">Today</button>
+    </div>
+</form>
+
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" />
+@if (RendererInfo.IsInteractive)
+{
+    <span hidden data-testid="interactive"></span>
+}
+
+<h2 class="print-only">Run of show · @Date.ToString("dddd d MMMM yyyy", Ui.Culture)@(SelectedCemetery is { } sc ? $" · {sc.Name}" : "")</h2>
+
+@if (Loading)
+{
+    <p role="status">Loading the roster…</p>
+}
+else if (_rows is not null)
+{
+    <div class="grid-4 roster-kpis no-print" data-testid="roster-kpis">
+        <div class="kpi"><span class="kpi__value">@_rows.Count</span><span class="kpi__label">Events on @Date.ToString("d MMM", Ui.Culture)</span></div>
+        <div class="kpi @(Unassigned > 0 ? "kpi--warn" : "kpi--ok")"><span class="kpi__value">@Unassigned</span><span class="kpi__label">Without an attendant</span></div>
+        <div class="kpi @(ChecklistsOpen > 0 ? "kpi--warn" : "kpi--ok")"><span class="kpi__value">@ChecklistsOpen</span><span class="kpi__label">Checklists not finished</span></div>
+        <div class="kpi @(_rows.Sum(r => r.OpenIncidents) > 0 ? "kpi--danger" : "kpi--ok")"><span class="kpi__value">@_rows.Sum(r => r.OpenIncidents)</span><span class="kpi__label">Open incidents</span></div>
+    </div>
+
+    @if (_rows.Count == 0)
+    {
+        <EmptyState Title="@($"No events on {Date.ToString("dddd d MMMM yyyy", Ui.Culture)}")">
+            <p>@(Me?.Has(Roles.EventAttendant) == true && Me?.Has(Roles.OperationsManager) != true
+                ? "You have no assigned events on this date. Pick another date, or ask the Operations Manager about your assignments."
+                : "Pick another date or cemetery. Approved and permitted events appear here on their event day.")</p>
+        </EmptyState>
+    }
+    else
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards roster-table" data-testid="roster-table">
+                    <caption>Who is where on @Date.ToString("dddd d MMMM yyyy", Ui.Culture), in venue-local time</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Time</th>
+                            <th scope="col">Venue</th>
+                            <th scope="col">Event</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Permit</th>
+                            <th scope="col">Attendants</th>
+                            <th scope="col">Readiness</th>
+                            <th scope="col" class="no-print"><span class="visually-hidden">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _rows)
+                        {
+                            <tr data-testid="roster-row" data-reference="@r.Reference" class="@(_selected == r.ApplicationId ? "is-selected" : null)">
+                                <td data-label="Time"><strong>@Ui.LocalTime(r.StartUtc, r.TimeZoneId)–@Ui.LocalTime(r.EndUtc, r.TimeZoneId)</strong> <span class="muted">@Ui.ShortZone(r.TimeZoneId)</span></td>
+                                <td data-label="Venue">@r.VenueName<br /><span class="muted">@Ui.Plural(r.Attendees, "attendee", "attendees")</span></td>
+                                <td data-label="Event"><strong>@r.Reference</strong><br />@r.Title<br /><span class="muted">@r.ApplicantName · @r.ApplicantPhone</span></td>
+                                <td data-label="Status"><StatusChip Status="r.Status" /></td>
+                                <td data-label="Permit">
+                                    @if (r.PermitNumber is null)
+                                    {
+                                        <span class="chip chip--attention">Not issued</span>
+                                    }
+                                    else
+                                    {
+                                        <span>@r.PermitNumber</span><br />
+                                        <span class="chip @(r.PermitValid ? "chip--good" : "chip--bad")" data-testid="permit-validity">@(r.PermitValid ? "Valid" : "Not valid")</span>
+                                    }
+                                </td>
+                                <td data-label="Attendants">
+                                    @if (r.Attendants.Count == 0)
+                                    {
+                                        <span class="chip chip--attention">None assigned</span>
+                                    }
+                                    else
+                                    {
+                                        @string.Join(", ", r.Attendants.Select(a => a.UserName))
+                                    }
+                                </td>
+                                <td data-label="Readiness">
+                                    <ul class="flags">
+                                        <li class="@(r.ReadinessTotal > 0 && r.ReadinessDone == r.ReadinessTotal ? "flag--ok" : "flag--todo")">Checklist @r.ReadinessDone/@r.ReadinessTotal</li>
+                                        <li class="@(r.AllocationCount > 0 ? "flag--ok" : "flag--info")">@Ui.Plural(r.AllocationCount, "resource allocated", "resources allocated")</li>
+                                        <li class="@(r.SevereWeather && !r.WeatherAcknowledged ? "flag--bad" : r.SevereWeather ? "flag--todo" : "flag--ok")">@WeatherText(r)</li>
+                                        <li class="@(r.OpenIncidents > 0 ? "flag--bad" : "flag--ok")">@Ui.Plural(r.OpenIncidents, "open incident", "open incidents")</li>
+                                    </ul>
+                                </td>
+                                <td data-label="Actions" class="no-print">
+                                    <button type="button" class="btn btn--small" aria-expanded="@(_selected == r.ApplicationId ? "true" : "false")" aria-controls="roster-detail"
+                                            @onclick="() => SelectAsync(r.ApplicationId)" data-testid="roster-open">
+                                        @(_selected == r.ApplicationId ? "Hide" : "Checklist & staff")<span class="visually-hidden"> for @r.Reference</span>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+@if (_detail is not null)
+{
+    <section class="card roster-detail no-print" id="roster-detail" aria-labelledby="roster-detail-title" data-testid="roster-detail">
+        <div class="row row--between">
+            <h2 id="roster-detail-title" tabindex="-1">@_detail.Reference · @_detail.Title</h2>
+            <StatusChip Status="_detail.Status" />
+        </div>
+        @if (_conflict is not null)
+        {
+            <ConflictPanel Rows="_conflict" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyAsync" />
+        }
+        <div class="grid-2">
+            <div>
+                <ReadinessList Items="_detail.Readiness" Key="roster" Busy="Busy" CanEdit="CanTick" OnToggle="ToggleAsync"
+                               ReadOnlyReason="@(CanTick ? "" : ReadinessReason)" />
+            </div>
+            <div class="stack">
+                <h3>Attendants</h3>
+                @{ var row = _rows?.FirstOrDefault(x => x.ApplicationId == _detail.ApplicationId); }
+                @if (row is null || row.Attendants.Count == 0)
+                {
+                    <p data-testid="no-attendants">No attendant is assigned yet.</p>
+                }
+                else
+                {
+                    <ul class="staff-list" data-testid="attendant-list">
+                        @foreach (var a in row.Attendants)
+                        {
+                            <li>
+                                <span>@a.UserName</span>
+                                @if (CanAssign)
+                                {
+                                    <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => AssignAsync(a.UserId, a.UserName, false)" data-testid="unassign">
+                                        Remove<span class="visually-hidden"> @a.UserName</span>
+                                    </button>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+                @if (CanAssign)
+                {
+                    <form class="form" @onsubmit="() => AssignAsync(_attendantInput, null, true)" @onsubmit:preventDefault novalidate data-testid="assign-form">
+                        <div class="field">
+                            <label for="assign-user">Assign an attendant</label>
+                            <select id="assign-user" @bind="_attendantInput" aria-invalid="@Invalid("userId")" aria-describedby="@(Invalid("userId") is null ? "assign-hint" : "assign-hint assign-error")" data-testid="assign-user">
+                                <option value="">Choose an attendant…</option>
+                                @foreach (var s in _attendants.Where(s => row?.Attendants.All(a => a.UserId != s.UserId) ?? true))
+                                {
+                                    <option value="@s.UserId">@s.DisplayName</option>
+                                }
+                            </select>
+                            <span class="field__hint" id="assign-hint">Attendants are assigned between approval and check-in. The change is audited.</span>
+                            @if (Problem?.For("userId") is { Length: > 0 } userErrors)
+                            {
+                                <p class="field__error" id="assign-error">@string.Join(" ", userErrors)</p>
+                            }
+                        </div>
+                        <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="assign-submit">Assign attendant</button>
+                    </form>
+                }
+                else
+                {
+                    <p class="muted">Only the Operations Manager assigns attendants.</p>
+                }
+            </div>
+        </div>
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "date")] public string? DateQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+
+    private IReadOnlyList<RosterRow>? _rows;
+    private IReadOnlyList<CemeteryOption> _cemeteries = [];
+    private IReadOnlyList<StaffOption> _attendants = [];
+    private EventDayDetail? _detail;
+    private Guid? _selected;
+    private DateOnly? _dateInput;
+    private string _cemeteryInput = "";
+    private string _attendantInput = "";
+    private IReadOnlyList<ConflictPanel.Row>? _conflict;
+    private Func<Task>? _retryAfterConflict;
+
+    private DateOnly Date { get; set; }
+    private CemeteryOption? SelectedCemetery => _cemeteries.FirstOrDefault(c => c.Id == CemeteryQuery);
+    private int Unassigned => _rows?.Count(r => r.Attendants.Count == 0) ?? 0;
+    private int ChecklistsOpen => _rows?.Count(r => r.ReadinessTotal == 0 || r.ReadinessDone < r.ReadinessTotal) ?? 0;
+    private bool CanAssign => Me?.Can(Cap.AssignAttendants) == true;
+    private bool CanTick => _detail is { AssignedToYou: true, Status: CaseStatus.Permitted or CaseStatus.CheckedIn };
+    private string PdfHref => $"/api/operations/run-of-show.pdf?date={Date:yyyy-MM-dd}" + (CemeteryQuery is { } c ? $"&cemeteryId={c}" : "");
+
+    private string LeadText => Me?.Has(Roles.EventAttendant) == true && Me?.Has(Roles.OperationsManager) != true
+        ? "Your assigned events for the day, their readiness and your checklist."
+        : Me?.Has(Roles.SchedulingOfficer) == true && Me?.Has(Roles.OperationsManager) != true
+            ? "Who is where on the event day (read-only for scheduling)."
+            : "Who is where on the event day, readiness flags, staff assignments and the printable run-of-show.";
+
+    private string ReadinessReason => _detail switch
+    {
+        { AssignedToYou: false } => "Read-only: only the attendant assigned to this event ticks the checklist.",
+        { Status: not (CaseStatus.Permitted or CaseStatus.CheckedIn) } => $"Read-only: the checklist is completed on the event day (the case is {Workflow.Display(_detail.Status)}).",
+        _ => "",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        Date = DateOnly.TryParseExact(DateQuery, "yyyy-MM-dd", Ui.Culture, System.Globalization.DateTimeStyles.None, out var d)
+            ? d : DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        _dateInput = Date;
+        _cemeteryInput = CemeteryQuery?.ToString() ?? "";
+        _detail = null;
+        _selected = null;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await LoadAsync(async actor =>
+        {
+            if (_cemeteries.Count == 0) _cemeteries = await Ops.CemeteriesAsync(actor);
+            if (actor.Can(Cap.AssignAttendants) && _attendants.Count == 0) _attendants = await Ops.AttendantsAsync(actor);
+            _rows = await Ops.RosterAsync(actor, Date, CemeteryQuery);
+            if (_selected is { } id) _detail = await Ops.EventDayAsync(actor, id);
+        });
+    }
+
+    private async Task ApplyFilters()
+    {
+        if (_dateInput is null)
+        {
+            await RunAsync(_ => throw ValidationException.For("date", "Choose the roster date."));
+            return;
+        }
+        Nav.NavigateTo(Url(_dateInput.Value, Guid.TryParse(_cemeteryInput, out var c) ? c : null));
+    }
+
+    private void GoToday() => Nav.NavigateTo(Url(DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime), CemeteryQuery));
+
+    private static string Url(DateOnly date, Guid? cemetery) => $"/operations/roster?date={date:yyyy-MM-dd}" + (cemetery is { } c ? $"&cemetery={c}" : "");
+
+    private async Task SelectAsync(Guid id)
+    {
+        _conflict = null;
+        Problem = null;
+        if (_selected == id)
+        {
+            _selected = null;
+            _detail = null;
+            return;
+        }
+        _selected = id;
+        _attendantInput = "";
+        await LoadAsync(async actor => _detail = await Ops.EventDayAsync(actor, id));
+    }
+
+    private async Task ToggleAsync((Guid Id, bool Done) change)
+    {
+        var item = _detail?.Readiness.FirstOrDefault(i => i.Id == change.Id);
+        if (_detail is null || item is null) return;
+        Func<Task> act = async () =>
+        {
+            await RunAsync(async actor => await Ops.SetReadinessAsync(actor, change.Id, change.Done, _detail!.Version),
+                $"{(change.Done ? "Done" : "Marked not done")}: {item.Label}.");
+            await AfterWriteAsync(item.Label, change.Done ? "Done" : "Not done");
+        };
+        _retryAfterConflict = act;
+        await act();
+    }
+
+    private async Task AssignAsync(string userId, string? name, bool assign)
+    {
+        if (_detail is null) return;
+        var label = name ?? _attendants.FirstOrDefault(a => a.UserId == userId)?.DisplayName ?? "";
+        Func<Task> act = async () =>
+        {
+            await RunAsync(async actor =>
+            {
+                if (assign && string.IsNullOrEmpty(userId)) throw ValidationException.For("userId", "Choose an attendant to assign.");
+                await Ops.AssignAttendantAsync(actor, _detail!.ApplicationId, _detail.Version, userId, assign);
+            }, assign ? $"{label} assigned to {_detail.Reference}." : $"{label} removed from {_detail.Reference}.");
+            if (Problem is null) _attendantInput = "";
+            await AfterWriteAsync("Attendants", assign ? $"Add {label}" : $"Remove {label}");
+        };
+        _retryAfterConflict = act;
+        await act();
+    }
+
+    /// <summary>After a write: reload on success; on 409 show saved values next to the caller's intended change.</summary>
+    private async Task AfterWriteAsync(string field, string mine)
+    {
+        var problem = Problem;
+        if (problem?.StatusCode == 409 && _selected is { } id)
+        {
+            var mineVersion = _detail?.Version;
+            await LoadAsync(async actor =>
+            {
+                _rows = await Ops.RosterAsync(actor, Date, CemeteryQuery);
+                _detail = await Ops.EventDayAsync(actor, id);
+            });
+            Problem = problem;
+            var current = _detail!.Readiness.FirstOrDefault(i => i.Label == field);
+            var attendants = string.Join(", ", _rows?.FirstOrDefault(r => r.ApplicationId == id)?.Attendants.Select(a => a.UserName) ?? []);
+            _conflict =
+            [
+                new("Case version", _detail.Version.ToString(Ui.Culture), mineVersion?.ToString(Ui.Culture)),
+                new(field, current is null ? attendants : current.Done ? $"Done by {current.DoneBy}" : "Not done", mine),
+            ];
+            return;
+        }
+        if (problem is null)
+        {
+            _conflict = null;
+            await LoadAsync(async actor =>
+            {
+                _rows = await Ops.RosterAsync(actor, Date, CemeteryQuery);
+                if (_selected is { } sel) _detail = await Ops.EventDayAsync(actor, sel);
+            });
+        }
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        _conflict = null;
+        _retryAfterConflict = null;
+        await ReloadAsync();
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflict = null;
+        if (_retryAfterConflict is { } retry) await retry();
+    }
+
+    private async Task PrintAsync() => await Js.InvokeVoidAsync("eventPermits.print");
+
+    private static string WeatherText(RosterRow r) => (r.SevereWeather, r.WeatherAcknowledged) switch
+    {
+        (true, true) => "Severe weather (acknowledged)",
+        (true, false) => "Severe weather (not acknowledged)",
+        _ => "No severe weather",
+    };
+}

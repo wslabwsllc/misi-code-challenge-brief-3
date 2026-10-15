@@ -1,0 +1,407 @@
+@page "/integrations/calendar"
+@attribute [Authorize(Policy = Cap.SyncCalendar)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@inject CalendarSyncService Sync
+@inject AdminService Admin
+
+<PageTitle>Regional Calendar Sync · Memorial Event Operations</PageTitle>
+<PageHeader Title="Regional Calendar Sync" Parent="@(("Integration Hub", "integrations"))"
+            Lead="OAuth-connected regional event calendar: imported events, our tentative holds, conflicts and the reconciliation queue. Approval stays blocked until a conflict is reconciled.">
+    <Actions>
+        <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="SyncNowAsync" data-testid="sync-now">@(Busy ? "Syncing…" : "Sync now")</button>
+    </Actions>
+</PageHeader>
+<ProblemAlert Problem="Problem" OnRetry="RetryAsync" />
+<LiveRegion Message="@Announcement" />
+
+@if (Loading && _o is null)
+{
+    <p class="muted" role="status">Loading the calendar connection…</p>
+}
+else if (_o is not null)
+{
+    var online = _o.LastRun?.Succeeded;
+    <div class="grid-4 status-cards" data-testid="sync-status">
+        <div class="kpi @(online == false ? "kpi--danger" : online == true ? "kpi--ok" : null)" data-testid="sync-connection">
+            <span class="kpi__label">Connection</span>
+            <strong class="kpi__value kpi__value--text">@(online switch { true => "Connected", false => "Offline", _ => "Not synced yet" })</strong>
+            <span class="kpi__label">@(online == false ? $"Last attempt failed {Ui.Utc(_o.LastRun!.StartedAt)}" : _o.LastSuccess is { } ls ? $"Last success {Ui.Utc(ls.StartedAt)}" : "Run a sync to connect")</span>
+        </div>
+        <div class="kpi @(_o.Token.LastError is not null ? "kpi--warn" : null)" data-testid="sync-token">
+            <span class="kpi__label">OAuth token (client credentials)</span>
+            <strong class="kpi__value kpi__value--text">@(_o.Token.HasToken ? "Cached" : "None cached")</strong>
+            <span class="kpi__label">
+                @if (_o.Token.ExpiresAt is { } exp)
+                {
+                    <text>Expires @Ui.Utc(exp) · renewed before expiry</text>
+                }
+                else
+                {
+                    <text>Acquired on the next call</text>
+                }
+            </span>
+        </div>
+        <div class="kpi">
+            <span class="kpi__label">Last sync</span>
+            <strong class="kpi__value kpi__value--text">@(_o.LastSuccess is { } s ? $"{s.Imported} new · {s.Updated} updated" : "—")</strong>
+            <span class="kpi__label">@(_o.LastSuccess is { } s2 ? $"{s2.Unchanged} unchanged, trigger {s2.Trigger}" : "No successful sync yet")</span>
+        </div>
+        <div class="kpi @(OpenItems > 0 ? "kpi--warn" : null)">
+            <span class="kpi__label">Open conflicts</span>
+            <strong class="kpi__value" data-testid="sync-open-count">@OpenItems</strong>
+            <span class="kpi__label">Cursor <code>@(string.IsNullOrEmpty(_o.Cursor) ? "none" : _o.Cursor)</code></span>
+        </div>
+    </div>
+
+    @if (online == false)
+    {
+        <div class="alert alert--warning" role="status" data-testid="sync-offline">
+            <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span><strong>The regional calendar is unavailable</strong></p>
+            <p>@_o.LastRun!.Error</p>
+            <p>Tentative reservations stay in place and their holds are retried automatically, but final approval is blocked until the calendar is reachable and reconciled.</p>
+        </div>
+    }
+    @if (_o.Token.LastError is { } tokenError)
+    {
+        <div class="alert alert--error" role="status" data-testid="sync-token-error">
+            <p class="alert__title"><span class="alert__icon" aria-hidden="true">×</span><strong>Token request refused</strong></p>
+            <p>@tokenError A System Admin should check the calendar client credentials in the environment configuration (values are never shown here).</p>
+        </div>
+    }
+
+    @if (_conflictRows is not null)
+    {
+        <ConflictPanel Rows="_conflictRows" OnReload="ReloadAfterConflictAsync" />
+    }
+
+    <section class="card card--flush" aria-labelledby="queue-title" data-testid="sync-queue">
+        <div class="card__pad">
+            <h2 id="queue-title">Reconciliation queue</h2>
+            <p class="muted">Raised when the calendar refuses a hold (409) or a sync imports an overlapping event. Move the reservation to an alternative slot, or mark the item resolved once the other organiser has moved.</p>
+        </div>
+        @if (_o.Queue.Count == 0)
+        {
+            <EmptyState Title="No conflicts to reconcile"><p>Holds that the calendar accepts never appear here.</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Reconciliation items, open first</caption>
+                    <thead><tr><th scope="col">Case</th><th scope="col">Our reservation</th><th scope="col">Conflicting event</th><th scope="col">Status and history</th><th scope="col">Actions</th></tr></thead>
+                    <tbody>
+                        @foreach (var item in _o.Queue)
+                        {
+                            var open = item.Status == ReconciliationStatus.Open;
+                            <tr data-testid="queue-row" data-reference="@item.Reference" data-status="@item.Status">
+                                <td data-label="Case"><a href="applications/detail?id=@item.ApplicationId">@item.Reference</a></td>
+                                <td data-label="Reservation">@item.VenueName<br />@Ui.Local(item.ReservationStartUtc, item.TimeZoneId, "ddd d MMM yyyy, HH:mm")<br /><span class="chip @CalendarStateClass(item.PushState)">@CalendarStateText(item.PushState)</span></td>
+                                <td data-label="Conflicting event">
+                                    @item.Source
+                                    @if (item.ConflictStartUtc is { } cs && item.ConflictEndUtc is { } ce)
+                                    {
+                                        <br /><span class="muted">@Ui.Local(cs, item.TimeZoneId, "ddd d MMM, HH:mm")–@Ui.LocalTime(ce, item.TimeZoneId)</span>
+                                    }
+                                </td>
+                                <td data-label="Status">
+                                    @if (open) { <span class="chip chip--bad">Open — approval blocked</span> } else { <span class="chip chip--good">Resolved</span> }
+                                    <ul class="history">
+                                        <li>Raised @Ui.Utc(item.CreatedAt)</li>
+                                        @if (item.ResolvedAt is { } at)
+                                        {
+                                            <li>Resolved @Ui.Utc(at) by @item.ResolvedBy: @item.Resolution</li>
+                                        }
+                                    </ul>
+                                </td>
+                                <td data-label="Actions">
+                                    @if (!open)
+                                    {
+                                        <span class="muted">No action needed</span>
+                                    }
+                                    else
+                                    {
+                                        <div class="stack-sm">
+                                            @if (CanReconcile && item.Alternatives.Count > 0)
+                                            {
+                                                <div class="row" role="group" aria-label="Alternative slots for @item.Reference">
+                                                    @foreach (var alt in item.Alternatives)
+                                                    {
+                                                        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ChooseAsync(item, alt)" data-testid="queue-alternative">Move to @Ui.Local(alt, item.TimeZoneId, "ddd d MMM HH:mm")</button>
+                                                    }
+                                                </div>
+                                            }
+                                            @if (CanReconcile)
+                                            {
+                                                @if (_resolveId == item.Id)
+                                                {
+                                                    <form class="form" @onsubmit="() => ResolveAsync(item)" @onsubmit:preventDefault novalidate data-testid="queue-resolve-form">
+                                                        <div class="field">
+                                                            <label for="reason-@item.Id">Resolution reason</label>
+                                                            <textarea id="reason-@item.Id" @bind="_reason" rows="3" maxlength="@Limits.ReasonMax" aria-invalid="@Invalid("reason")" aria-describedby="@Describe("reason", $"reason-hint-{item.Id}")" data-testid="queue-reason"></textarea>
+                                                            <span class="field__hint" id="reason-hint-@item.Id">@Limits.ReasonMin–@Limits.ReasonMax characters, e.g. who agreed to move and when.</span>
+                                                            <FieldErrors Id="@ErrorId("reason")" Messages="@(Errors("reason"))" />
+                                                        </div>
+                                                        <div class="row">
+                                                            <button type="submit" class="btn btn--primary btn--small" disabled="@Busy" data-testid="queue-resolve-submit">Mark resolved</button>
+                                                            <button type="button" class="btn btn--small" @onclick="() => { _resolveId = null; Problem = null; }">Cancel</button>
+                                                        </div>
+                                                    </form>
+                                                }
+                                                else
+                                                {
+                                                    <button type="button" class="btn btn--small" @onclick="() => OpenResolve(item)" data-testid="queue-resolve">Mark resolved…</button>
+                                                }
+                                            }
+                                            <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => RetryPushAsync(item.ReservationId, item.Reference)" data-testid="queue-retry">Retry push</button>
+                                        </div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="card card--flush" aria-labelledby="holds-title" data-testid="sync-holds">
+        <div class="card__pad">
+            <h2 id="holds-title">Our holds in the regional calendar</h2>
+            <p class="muted">Every tentative reservation is pushed as a hold through the outbox; failed pushes retry with backoff.</p>
+        </div>
+        @if (_o.Holds.Count == 0)
+        {
+            <EmptyState Title="No active reservations to hold"><p>Holds appear after a Scheduling Officer reserves a slot.</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Reservation holds and their push state</caption>
+                    <thead><tr><th scope="col">Case</th><th scope="col">Venue and start</th><th scope="col">Push state</th><th scope="col">External hold</th><th scope="col">Actions</th></tr></thead>
+                    <tbody>
+                        @foreach (var h in _o.Holds)
+                        {
+                            <tr data-testid="hold-row" data-reference="@h.Reference" data-state="@h.State">
+                                <td data-label="Case"><a href="applications/detail?id=@h.ApplicationId">@h.Reference</a></td>
+                                <td data-label="Venue and start">@h.VenueName<br />@Ui.Local(h.StartUtc, ZoneOfVenueName(h.VenueName), "ddd d MMM yyyy, HH:mm")</td>
+                                <td data-label="Push state"><span class="chip @CalendarStateClass(h.State)">@CalendarStateText(h.State)</span>@if (h.PushedAt is { } p) { <br /><span class="muted">@Ui.Utc(p)</span> }</td>
+                                <td data-label="External hold">@(h.ExternalId ?? "—")</td>
+                                <td data-label="Actions">
+                                    @if (h.State == CalendarPushState.Pushed)
+                                    {
+                                        <span class="muted">Accepted</span>
+                                    }
+                                    else
+                                    {
+                                        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => RetryPushAsync(h.ReservationId, h.Reference)" data-testid="hold-retry">Retry push</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="card card--flush" aria-labelledby="events-title" data-testid="sync-events">
+        <div class="card__pad">
+            <h2 id="events-title">Imported external events</h2>
+            <p class="muted">Deduplicated by external ID and updated only when the calendar reports a newer modification time. Times are venue-local.</p>
+        </div>
+        @if (_o.Events.Count == 0)
+        {
+            <EmptyState Title="No external events imported yet"><p>Use Sync now to import events from the regional calendar.</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards table--compact">
+                    <caption class="visually-hidden">External calendar events</caption>
+                    <thead><tr><th scope="col">External ID</th><th scope="col">Event</th><th scope="col">Venue</th><th scope="col">When (venue-local)</th><th scope="col">Modified (UTC)</th><th scope="col">Flags</th></tr></thead>
+                    <tbody>
+                        @foreach (var e in _o.Events)
+                        {
+                            var zone = ZoneOfCode(e.VenueCode);
+                            <tr data-testid="event-row" data-external-id="@e.ExternalId">
+                                <td data-label="External ID" class="mono">@e.ExternalId</td>
+                                <td data-label="Event">@e.Title</td>
+                                <td data-label="Venue">@(e.VenueName ?? $"Unknown venue {e.VenueCode}")</td>
+                                <td data-label="When">@Ui.Local(e.StartUtc, zone, "ddd d MMM, HH:mm")–@Ui.LocalTime(e.EndUtc, zone)</td>
+                                <td data-label="Modified">@Ui.Utc(e.ModifiedUtc)</td>
+                                <td data-label="Flags">
+                                    @if (e.Own) { <span class="chip chip--brand">Our hold</span> }
+                                    else if (e.Conflicts) { <span class="chip chip--bad">Overlaps a reservation</span> }
+                                    else { <span class="chip chip--outline">External</span> }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <div class="grid-2">
+        <section class="card card--flush" aria-labelledby="runs-title" data-testid="sync-runs">
+            <div class="card__pad"><h2 id="runs-title">Sync history</h2></div>
+            @if (_o.Runs.Count == 0)
+            {
+                <EmptyState Title="No sync has run yet" />
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact">
+                        <caption class="visually-hidden">Recent sync runs</caption>
+                        <thead><tr><th scope="col">Started (UTC)</th><th scope="col">Trigger</th><th scope="col">Result</th></tr></thead>
+                        <tbody>
+                            @foreach (var r in _o.Runs)
+                            {
+                                <tr data-testid="run-row" data-ok="@r.Succeeded">
+                                    <td data-label="Started">@Ui.Utc(r.StartedAt)</td>
+                                    <td data-label="Trigger">@r.Trigger</td>
+                                    <td data-label="Result">
+                                        @if (r.Succeeded) { <span class="chip chip--good">OK</span> <span>@r.Imported new, @r.Updated updated, @r.Unchanged unchanged</span> }
+                                        else { <span class="chip chip--bad">Failed</span> <span>@r.Error</span> }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+        <section class="card card--flush" aria-labelledby="attempts-title" data-testid="sync-attempts">
+            <div class="card__pad"><h2 id="attempts-title">Recent calendar requests</h2></div>
+            @if (_o.RecentAttempts.Count == 0)
+            {
+                <EmptyState Title="No requests recorded yet" />
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact">
+                        <caption class="visually-hidden">Recent integration attempts against the regional calendar</caption>
+                        <thead><tr><th scope="col">At (UTC)</th><th scope="col">Operation</th><th scope="col">Outcome</th></tr></thead>
+                        <tbody>
+                            @foreach (var a in _o.RecentAttempts)
+                            {
+                                <tr>
+                                    <td data-label="At">@Ui.Utc(a.At)</td>
+                                    <td data-label="Operation"><a href="integrations/attempts/@a.Id">@a.Operation</a></td>
+                                    <td data-label="Outcome">@a.Outcome @(a.StatusCode is { } sc ? $"(HTTP {sc})" : "") · @a.DurationMs ms</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    private CalendarSyncOverview? _o;
+    private IReadOnlyList<VenueRow> _venues = [];
+    private Guid? _resolveId;
+    private string? _reason;
+    private Func<Task>? _retry;
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+
+    private bool CanReconcile => Me?.Can(Cap.ManageReservations) == true;
+    private int OpenItems => _o?.Queue.Count(q => q.Status == ReconciliationStatus.Open) ?? 0;
+
+    protected override Task OnInitializedAsync() => LoadOverviewAsync();
+
+    private async Task LoadOverviewAsync()
+    {
+        Problem = null;
+        _retry = LoadOverviewAsync;
+        await LoadAsync(async me =>
+        {
+            if (_venues.Count == 0) _venues = await Admin.VenuesAsync(me);
+            _o = await Sync.OverviewAsync(me);
+        });
+    }
+
+    private async Task RefreshAsync() => _o = await Sync.OverviewAsync(await GetActorAsync());
+
+    private Task RetryAsync() => _retry?.Invoke() ?? LoadOverviewAsync();
+
+    private async Task SyncNowAsync()
+    {
+        _conflictRows = null;
+        _retry = SyncNowAsync;
+        CalendarSyncRun? run = null;
+        var ok = await RunAsync(async me => run = await Sync.SyncNowAsync(me));
+        if (!ok) return;
+        if (run is { Succeeded: true })
+            Announcement = $"Sync complete: {run.Imported} new, {run.Updated} updated, {run.Unchanged} unchanged.";
+        else
+            Problem = new UiProblem(503, ErrorCodes.CalendarUnavailable, run?.Error ?? "The regional calendar did not answer.", new Dictionary<string, string[]>(), null, 0, true, Correlation.CorrelationId);
+        await RefreshAsync();
+    }
+
+    private async Task RetryPushAsync(Guid reservationId, string reference)
+    {
+        _conflictRows = null;
+        _retry = () => RetryPushAsync(reservationId, reference);
+        await RunAsync(me => Sync.RetryPushAsync(me, reservationId), $"Hold for {reference} pushed again.");
+        await RefreshAsync();
+    }
+
+    private void OpenResolve(ReconciliationRow item)
+    {
+        _resolveId = item.Id;
+        _reason = null;
+        Problem = null;
+    }
+
+    private async Task ResolveAsync(ReconciliationRow item)
+    {
+        _conflictRows = null;
+        var text = _reason?.Trim() ?? "";
+        if (text.Length < Limits.ReasonMin || text.Length > Limits.ReasonMax)
+        {
+            Fail(new Dictionary<string, string[]> { ["reason"] = [text.Length == 0 ? "Resolution reason is required." : $"Resolution reason must be {Limits.ReasonMin} to {Limits.ReasonMax} characters."] });
+            return;
+        }
+        var ok = await RunAsync(me => Sync.ResolveAsync(me, item.Id, text), $"{item.Reference}: conflict marked resolved; the hold will be pushed again.");
+        if (ok) _resolveId = null;
+        await RefreshAsync();
+    }
+
+    private async Task ChooseAsync(ReconciliationRow item, DateTimeOffset alternative)
+    {
+        _conflictRows = null;
+        _retry = null;
+        var ok = await RunAsync(me => Sync.ChooseAlternativeAsync(me, item.Id, alternative, item.CaseVersion),
+            $"{item.Reference} moved to {Ui.Local(alternative, item.TimeZoneId, "ddd d MMM HH:mm")}; a new hold is queued.");
+        var problem = Problem;
+        await RefreshAsync();
+        if (!ok && problem?.StatusCode == 409)
+        {
+            var saved = _o?.Queue.FirstOrDefault(q => q.Id == item.Id);
+            _conflictRows =
+            [
+                new("Reservation start", saved is null ? null : Ui.Local(saved.ReservationStartUtc, saved.TimeZoneId, "ddd d MMM HH:mm"), Ui.Local(alternative, item.TimeZoneId, "ddd d MMM HH:mm")),
+                new("Item status", saved?.Status.ToString(), item.Status.ToString()),
+            ];
+        }
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        _conflictRows = null;
+        Problem = null;
+        await RefreshAsync();
+        Announcement = "Reloaded the latest reconciliation queue.";
+    }
+
+    private string? ZoneOfCode(string code) => _venues.FirstOrDefault(v => v.Code == code)?.TimeZoneId;
+
+    private string? ZoneOfVenueName(string name) => _venues.FirstOrDefault(v => v.Name == name)?.TimeZoneId;
+}

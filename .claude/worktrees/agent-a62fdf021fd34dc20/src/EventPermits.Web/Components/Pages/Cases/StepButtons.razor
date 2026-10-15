@@ -1,0 +1,16 @@
+@* Wizard step footer: the submit button saves the step as complete and moves on. *@
+<div class="row">
+    @if (Step > 1)
+    {
+        <button type="button" class="btn" @onclick="OnBack" disabled="@Busy" data-testid="wizard-back">Back</button>
+    }
+    <button type="button" class="btn" @onclick="OnSaveDraft" disabled="@Busy" data-testid="wizard-save">Save draft</button>
+    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="wizard-next">Save and continue</button>
+</div>
+
+@code {
+    [Parameter] public int Step { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback OnSaveDraft { get; set; }
+}

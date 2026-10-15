@@ -1,0 +1,13 @@
+.vault__layout { display: grid; gap: var(--space-4); grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); align-items: start; }
+.vault__buttons { grid-column: 1 / -1; }
+.vault__pad { padding: var(--space-5); margin: 0; }
+.vault__name { font-weight: 600; overflow-wrap: anywhere; }
+.vault__access { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.vault__panel-title { margin: 0; font-size: 1.15rem; overflow-wrap: anywhere; }
+.vault__hash { overflow-wrap: anywhere; word-break: break-all; }
+.vault__preview { display: block; max-width: 100%; max-height: 420px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.vault__preview--pdf { width: 100%; height: 420px; }
+
+@media (max-width: 1100px) {
+  .vault__layout { grid-template-columns: 1fr; }
+}

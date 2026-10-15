@@ -1,0 +1,99 @@
+{
+  "note": "Fictional weather. Each venue has a baseline; severeDays lists day offsets (from today, venue-local) with a Severe advisory.",
+  "venues": [
+    {
+      "venueCode": "RMP-CHAPEL",
+      "baseTemperatureC": 14,
+      "baseWindKph": 8,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "RMP-LAWN",
+      "baseTemperatureC": 15,
+      "baseWindKph": 11,
+      "severeDays": [
+        1
+      ],
+      "advisoryDays": [
+        2
+      ]
+    },
+    {
+      "venueCode": "RMP-PAVILION",
+      "baseTemperatureC": 16,
+      "baseWindKph": 14,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "RMP-GARDEN",
+      "baseTemperatureC": 17,
+      "baseWindKph": 17,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "CHG-CHAPEL",
+      "baseTemperatureC": 18,
+      "baseWindKph": 20,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "CHG-LAWN",
+      "baseTemperatureC": 19,
+      "baseWindKph": 23,
+      "severeDays": [],
+      "advisoryDays": [
+        2
+      ]
+    },
+    {
+      "venueCode": "CHG-PAVILION",
+      "baseTemperatureC": 20,
+      "baseWindKph": 26,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "CHG-GARDEN",
+      "baseTemperatureC": 21,
+      "baseWindKph": 9,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "MVR-CHAPEL",
+      "baseTemperatureC": 22,
+      "baseWindKph": 12,
+      "severeDays": [],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "MVR-LAWN",
+      "baseTemperatureC": 14,
+      "baseWindKph": 15,
+      "severeDays": [],
+      "advisoryDays": [
+        2
+      ]
+    },
+    {
+      "venueCode": "MVR-PAVILION",
+      "baseTemperatureC": 15,
+      "baseWindKph": 18,
+      "severeDays": [
+        3
+      ],
+      "advisoryDays": []
+    },
+    {
+      "venueCode": "MVR-GARDEN",
+      "baseTemperatureC": 16,
+      "baseWindKph": 21,
+      "severeDays": [],
+      "advisoryDays": []
+    }
+  ]
+}

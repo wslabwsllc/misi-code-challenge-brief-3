@@ -1,0 +1,248 @@
+@page "/integrations/registry"
+@attribute [Authorize(Policy = Cap.ViewRegistry)]
+@rendermode InteractiveServer
+@inherits DecisionPage
+@using EventPermits.Application.Services
+@inject ReviewService ReviewSvc
+@inject IntegrationHubService Hub
+
+<PageTitle>Registry Verification · Memorial Event Operations</PageTitle>
+<PageHeader Title="Applicant Registry Verification" Parent="@(("Integration Hub", "/integrations"))"
+            Lead="Check an applicant reference against the external registry. Every check is a real call through the integration pipeline and is kept as evidence with its call record." />
+<LiveRegion Message="@Announcement" />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+<div class="split">
+    <div class="stack">
+        @if (CanVerify)
+        {
+            <section class="card" aria-labelledby="lookup-title">
+                <h2 id="lookup-title">Look up a reference</h2>
+                <form class="form lookup" @onsubmit="LookupAsync" novalidate data-testid="lookup-form">
+                    <div class="field">
+                        <label for="reference">Registry reference</label>
+                        <input id="reference" @bind="_reference" autocomplete="off" spellcheck="false" aria-invalid="@Invalid("reference")"
+                               aria-describedby="@Describe("reference", "reference", hint: true)" data-testid="lookup-reference" />
+                        <span class="field__hint" id="reference-hint">For example REF-10001 (3 to 40 characters). Not linked to a case; use the review queue to verify a case.</span>
+                        <FieldError Problem="Problem" Field="reference" Id="reference" />
+                    </div>
+                    <div class="row">
+                        <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="lookup-submit">@(Busy ? "Checking…" : "Verify reference")</button>
+                    </div>
+                </form>
+            </section>
+        }
+        else if (Me is not null)
+        {
+            <p class="notice" data-testid="registry-read-only">Read-only: your role can review the verification history and call records but cannot run registry checks.</p>
+        }
+
+        @if (_result is not null)
+        {
+            <section class="card result result--@ResultTone" aria-labelledby="result-title" data-testid="lookup-result">
+                <h2 id="result-title" tabindex="-1">Result for <code>@_result.Reference</code></h2>
+                <p class="row"><RegistryChip Outcome="_result.Outcome" Eligibility="_result.Eligibility" /> <span>@_result.Detail</span></p>
+                <dl class="dl">
+                    <dt>Matched name</dt><dd>@(_result.MatchedName ?? "—")</dd>
+                    <dt>Eligibility</dt><dd>@(_result.Eligibility?.ToString() ?? "—")</dd>
+                    <dt>Registry verified at</dt><dd>@(_result.VerifiedAt is { } va ? Ui.Utc(va) : "—")</dd>
+                    <dt>Checked</dt><dd>@Ui.Utc(_result.CreatedAt) by @_result.RequestedBy</dd>
+                    @if (_result.AttemptId is { } attempt)
+                    {
+                        <dt>Call record</dt><dd><a href="/integrations/attempts/@attempt">Integration attempt</a></dd>
+                    }
+                </dl>
+                @if (_result.Outcome == VerificationOutcome.Pending)
+                {
+                    <p class="notice">Verification pending: no evidence was recorded as Valid. @(_result.RetryAfter is { } ra ? $"The registry asked to wait {ra.TotalSeconds:0} seconds." : "") Nothing passes without evidence.</p>
+                    @if (CanVerify)
+                    {
+                        <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="RetryAsync" data-testid="lookup-retry">Retry verification</button>
+                    }
+                }
+                else if (_result.Outcome == VerificationOutcome.NotFound)
+                {
+                    <p class="muted">The registry has no record for this reference. Not-found answers are final and are not retried automatically.</p>
+                }
+            </section>
+        }
+    </div>
+
+    <section class="card" aria-labelledby="attempts-title">
+        <h2 id="attempts-title">Recent registry calls</h2>
+        @if (_attempts is null)
+        {
+            <p role="status">Loading…</p>
+        }
+        else if (_attempts.Count == 0)
+        {
+            <EmptyState Title="No registry calls yet">Run a lookup to see the call, its timing and its outcome here.</EmptyState>
+        }
+        else
+        {
+            <ul class="attempts" data-testid="registry-attempts">
+                @foreach (var a in _attempts)
+                {
+                    <li>
+                        <span class="chip @(a.Outcome == AttemptOutcome.Success ? "chip--good" : a.Outcome == AttemptOutcome.ClientError ? "chip--attention" : "chip--bad")">@a.Outcome</span>
+                        <strong>@(a.StatusCode is { } sc ? $"HTTP {sc}" : "No response")</strong>
+                        <span>@a.DurationMs ms · attempt @a.AttemptNumber</span>
+                        <span class="muted">@Ui.Utc(a.At) · @a.Operation</span>
+                        <a href="/integrations/attempts/@a.Id">Details<span class="visually-hidden"> of the call at @Ui.Utc(a.At)</span></a>
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+</div>
+
+<section aria-labelledby="history-title">
+    <h2 id="history-title">Verification history</h2>
+    <form class="filters" @onsubmit="ApplyFilter" novalidate role="search" aria-label="Filter verification history">
+        <div class="field">
+            <label for="history-ref">Reference contains</label>
+            <input id="history-ref" type="search" @bind="_filter" data-testid="history-filter" />
+        </div>
+        <div class="row">
+            <button type="submit" class="btn" data-testid="history-apply">Filter</button>
+            @if (!string.IsNullOrWhiteSpace(RefParam))
+            {
+                <a class="btn btn--quiet" href="/integrations/registry">Clear</a>
+            }
+        </div>
+    </form>
+    @if (_history is null)
+    {
+        <p role="status">Loading the history…</p>
+    }
+    else if (_history.Count == 0)
+    {
+        <EmptyState Title="@(string.IsNullOrWhiteSpace(RefParam) ? "No verifications yet" : "No verifications match this reference")">
+            <p>Checks run from this page and from the eligibility review queue are listed here.</p>
+        </EmptyState>
+    }
+    else
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="registry-history">
+                    <caption>@Ui.Plural(_historyTotal, "verification", "verifications"), newest first</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Checked</th>
+                            <th scope="col">Reference</th>
+                            <th scope="col">Case</th>
+                            <th scope="col">Result</th>
+                            <th scope="col">Matched name</th>
+                            <th scope="col">By</th>
+                            <th scope="col">Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var v in _history)
+                        {
+                            <tr data-testid="history-row" data-reference="@v.Reference">
+                                <td data-label="Checked">@Ui.Utc(v.CreatedAt)</td>
+                                <td data-label="Reference"><code>@v.Reference</code></td>
+                                <td data-label="Case">
+                                    @if (v.ApplicationId is { } appId && v.ApplicationReference is not null)
+                                    {
+                                        <a href="/applications/@appId">@v.ApplicationReference</a>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">Ad-hoc lookup</span>
+                                    }
+                                </td>
+                                <td data-label="Result"><RegistryChip Outcome="v.Outcome" Eligibility="v.Eligibility" /></td>
+                                <td data-label="Matched name">@(v.MatchedName ?? "—")</td>
+                                <td data-label="By">@v.RequestedBy</td>
+                                <td data-label="Detail">
+                                    @v.Detail
+                                    @if (v.AttemptId is { } att)
+                                    {
+                                        <br /><a href="/integrations/attempts/@att">Call record<span class="visually-hidden"> for @v.Reference at @Ui.Utc(v.CreatedAt)</span></a>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="PageNumber" Total="_historyTotal" OnPage="GoToPage" />
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "ref")] public string? RefParam { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+
+    private string? _reference;
+    private string? _filter;
+    private VerificationView? _result;
+    private IReadOnlyList<VerificationView>? _history;
+    private int _historyTotal;
+    private IReadOnlyList<IntegrationAttempt>? _attempts;
+
+    private bool CanVerify => Me?.Can(Cap.VerifyRegistry) == true;
+    private int PageNumber => Math.Max(1, PageParam ?? 1);
+
+    private string ResultTone => _result?.Outcome switch
+    {
+        VerificationOutcome.Matched when _result.Eligibility == RegistryEligibility.Valid => "good",
+        VerificationOutcome.Pending => "pending",
+        _ => "attention",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!RendererInfo.IsInteractive) return;
+        _filter = RefParam;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await LoadAsync(async actor =>
+        {
+            (_history, _historyTotal) = await ReviewSvc.VerificationHistoryAsync(actor, RefParam, PageNumber);
+            (_attempts, _) = await Hub.AttemptsAsync(actor, IntegrationKind.Registry, null, null, 1);
+        });
+    }
+
+    private async Task LookupAsync()
+    {
+        if (ClientInvalid(new FieldChecks().Text("reference", _reference, 3, 40, "Reference"))) return;
+        await VerifyAsync(_reference!);
+    }
+
+    private Task RetryAsync() => _result is null ? Task.CompletedTask : VerifyAsync(_result.Reference);
+
+    private async Task VerifyAsync(string reference)
+    {
+        VerificationView? result = null;
+        if (await RunAsync(async actor =>
+            {
+                result = await ReviewSvc.VerifyAsync(actor, reference, null);
+                (_history, _historyTotal) = await ReviewSvc.VerificationHistoryAsync(actor, RefParam, PageNumber);
+                (_attempts, _) = await Hub.AttemptsAsync(actor, IntegrationKind.Registry, null, null, 1);
+            }))
+        {
+            _result = result;
+            Announcement = result!.Outcome == VerificationOutcome.Pending
+                ? $"Verification pending for {result.Reference}. Retry when the registry is available."
+                : $"Registry answered for {result.Reference}: {result.Detail}";
+            FocusAfterRender("#result-title");
+        }
+    }
+
+    private void ApplyFilter() => Nav.NavigateTo(Nav.GetUriWithQueryParameters("/integrations/registry", new Dictionary<string, object?>
+    {
+        ["ref"] = string.IsNullOrWhiteSpace(_filter) ? null : _filter.Trim(),
+        ["page"] = null,
+    }));
+
+    private void GoToPage(int page) => Nav.NavigateTo(Nav.GetUriWithQueryParameter("page", page));
+}

@@ -1,0 +1,141 @@
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject AdminService Admin
+
+<section class="card card--flush ur-section" id="templates" aria-labelledby="templates-title" data-testid="ur-templates">
+    <div class="ur-section__head">
+        <h2 id="templates-title">Notification templates</h2>
+        <p class="muted">Placeholders in double braces are filled per message: @string.Join(", ", NotificationOutbox.Placeholders.Select(p => "{{" + p + "}}")). Unknown placeholders are refused.</p>
+    </div>
+    <div class="ur-pad">
+        <ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+        <LiveRegion Message="@Announcement" />
+    </div>
+
+    @if (Loading && _templates.Count == 0)
+    {
+        <p class="muted ur-pad" role="status">Loading templates…</p>
+    }
+    else if (_templates.Count == 0)
+    {
+        <div class="ur-pad"><EmptyState Title="No templates are configured" /></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact">
+                <caption class="visually-hidden">Notification templates</caption>
+                <thead><tr><th scope="col">Template</th><th scope="col">Subject</th><th scope="col">Channel</th><th scope="col">State</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                <tbody>
+                    @foreach (var t in _templates)
+                    {
+                        <tr data-testid="@($"template-row-{t.Code}")">
+                            <td data-label="Template"><strong>@t.Name</strong><br /><span class="mono muted">@t.Code</span></td>
+                            <td data-label="Subject" class="ur-wrap">@t.Subject</td>
+                            <td data-label="Channel">@t.Channel</td>
+                            <td data-label="State"><span class="chip @(t.IsActive ? "chip--good" : "chip--draft")">@(t.IsActive ? "Active" : "Inactive")</span></td>
+                            <td data-label="Actions"><button type="button" class="btn btn--small" @onclick="() => Open(t)" data-testid="@($"template-open-{t.Code}")">@(CanEdit ? "Edit" : "View")<span class="visually-hidden"> @t.Name</span></button></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (_open is { } tpl)
+    {
+        <div class="ur-panel" data-testid="template-editor">
+            <h3 id="template-editor-title" tabindex="-1">@(CanEdit ? "Edit" : "View") template: @tpl.Name</h3>
+            @if (_conflict && _templates.FirstOrDefault(x => x.Id == tpl.Id) is { } saved)
+            {
+                <ConflictPanel Rows="@([new ConflictPanel.Row("Subject", saved.Subject, _subject), new ConflictPanel.Row("Body", saved.Body, _body), new ConflictPanel.Row("Active", saved.IsActive ? "Yes" : "No", _active ? "Yes" : "No")])"
+                               OnReload="() => Open(saved)" OnReapply="SaveAsync" />
+            }
+            <div class="ur-editor">
+                <form class="form" @onsubmit="SaveAsync" @onsubmit:preventDefault novalidate>
+                    <div class="field">
+                        <label for="tpl-subject">Subject</label>
+                        <input id="tpl-subject" @bind="_subject" @bind:event="oninput" maxlength="200" readonly="@(!CanEdit)" aria-invalid="@Invalid("subject")" aria-describedby="tpl-subject-error" data-testid="template-subject" />
+                        <span id="tpl-subject-error" class="field__error">@string.Join(" ", Problem?.For("subject") ?? [])</span>
+                    </div>
+                    <div class="field">
+                        <label for="tpl-body">Body</label>
+                        <textarea id="tpl-body" rows="8" @bind="_body" @bind:event="oninput" maxlength="4000" readonly="@(!CanEdit)" aria-invalid="@Invalid("body")" aria-describedby="tpl-body-error" data-testid="template-body"></textarea>
+                        <span id="tpl-body-error" class="field__error" data-testid="template-body-error">@string.Join(" ", Problem?.For("body") ?? [])</span>
+                    </div>
+                    @if (CanEdit)
+                    {
+                        <label class="check" for="tpl-active"><input id="tpl-active" type="checkbox" @bind="_active" data-testid="template-active" /> Active (used when this event happens)</label>
+                        <div class="row">
+                            <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="template-save">Save template</button>
+                            <button type="button" class="btn btn--quiet" @onclick="Close">Close</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <div><button type="button" class="btn" @onclick="Close">Close</button></div>
+                    }
+                </form>
+                <div class="ur-preview" aria-labelledby="tpl-preview-title" role="region" data-testid="template-preview">
+                    <h4 id="tpl-preview-title">Preview with sample data</h4>
+                    <p><strong>@AdminService.Preview(_subject)</strong></p>
+                    <p class="ur-preview__body">@AdminService.Preview(_body)</p>
+                </div>
+            </div>
+        </div>
+    }
+</section>
+
+@code {
+    private IReadOnlyList<TemplateRow> _templates = [];
+    private TemplateRow? _open;
+    private string _subject = "";
+    private string _body = "";
+    private bool _active;
+    private bool _conflict;
+
+    private bool CanEdit => Me?.Can(Cap.ManageRules) == true;
+
+    protected override Task OnInitializedAsync() => LoadAsync(async actor => _templates = await Admin.TemplatesAsync(actor));
+
+    private async Task ReloadAsync() => await RunAsync(async actor => _templates = await Admin.TemplatesAsync(actor));
+
+    private async Task Open(TemplateRow t)
+    {
+        _open = t;
+        _subject = t.Subject;
+        _body = t.Body;
+        _active = t.IsActive;
+        _conflict = false;
+        Problem = null;
+        StateHasChanged();
+        await Task.Yield();
+        await Js.InvokeVoidAsync("eventPermits.focus", "#template-editor-title");
+    }
+
+    private void Close()
+    {
+        _open = null;
+        _conflict = false;
+        Problem = null;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_open is not { } t) return;
+        _conflict = false;
+        var version = (_templates.FirstOrDefault(x => x.Id == t.Id) ?? t).Version;
+        if (await RunAsync(async actor =>
+            {
+                await Admin.UpdateTemplateAsync(actor, t.Id, version, _subject, _body, _active);
+                _templates = await Admin.TemplatesAsync(actor);
+                _open = _templates.FirstOrDefault(x => x.Id == t.Id);
+            }, $"Template {t.Code} saved."))
+            return;
+        if (Problem?.StatusCode == 409)
+        {
+            _conflict = true;
+            await LoadAsync(async actor => _templates = await Admin.TemplatesAsync(actor));
+        }
+    }
+}

@@ -1,0 +1,334 @@
+@page "/approvals"
+@attribute [Authorize(Policy = Cap.ApproveCases)]
+@rendermode InteractiveServer
+@inherits DecisionPage
+@using EventPermits.Application.Services
+@inject ApprovalService ApprovalSvc
+@inject CaseService CaseSvc
+@inject CalendarSyncService CalendarSvc
+
+<PageTitle>Approval Workspace · Memorial Event Operations</PageTitle>
+<PageHeader Title="Approval Workspace"
+            Lead="Cases waiting for final approval, with the reservation, eligibility outcome, registry evidence, weather and regional calendar status. Your decision is recorded as a signed-off approval decision." />
+<LiveRegion Message="@Announcement" />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+@if (_row is not null && _case is not null)
+{
+    var r = _row;
+    var c = _case;
+    <section class="card decide" aria-labelledby="decide-title" data-testid="approval-panel" data-case="@r.Reference">
+        <div class="row row--between">
+            <h2 id="decide-title" tabindex="-1">Decide on @r.Reference</h2>
+            <a class="btn btn--small" href="/approvals" data-testid="approval-close">Back to the list</a>
+        </div>
+        <p class="row"><StatusChip Status="c.Status" /> <span class="muted">@r.Title · @r.Applicant · record version @r.Version</span> <a href="/applications/@r.Id">Open the full case</a></p>
+        @if (IsConflict && ConflictRows is not null)
+        {
+            <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyAsync" />
+        }
+        <div class="split">
+            <div class="stack">
+                <section aria-labelledby="reservation-title">
+                    <h3 id="reservation-title">Reservation summary</h3>
+                    @if (c.Reservation is { } res)
+                    {
+                        <dl class="dl" data-testid="reservation-summary">
+                            <dt>Venue</dt><dd>@res.VenueName @(c.Event.CemeteryName is { } cem ? $"· {cem}" : "")</dd>
+                            <dt>Event</dt><dd>@Local(res.StartUtc, c.Event.TimeZoneId) – @Ui.LocalTime(res.EndUtc, c.Event.TimeZoneId)</dd>
+                            <dt>Venue blocked</dt><dd>@Ui.LocalTime(res.BlockStartUtc, c.Event.TimeZoneId) – @Ui.LocalTime(res.BlockEndUtc, c.Event.TimeZoneId) (setup and teardown)</dd>
+                            <dt>Attendees</dt><dd>@res.AttendeeCount @(c.Event.VenueCapacity is { } cap ? $"of {cap} capacity" : "")</dd>
+                            <dt>Resources</dt><dd>@(res.Allocations.Count(a => !a.Released) == 0 ? "None allocated" : string.Join(", ", res.Allocations.Where(a => !a.Released).Select(a => $"{a.Quantity} {a.Unit} {a.Name}")))</dd>
+                            <dt>Attendant needs</dt><dd>@(string.IsNullOrWhiteSpace(res.AttendantNeeds) ? "None stated" : res.AttendantNeeds)</dd>
+                            <dt>Regional calendar</dt><dd>@CalendarState(res.CalendarState)@(res.ExternalReservationId is { } ext ? $" · {ext}" : "")</dd>
+                        </dl>
+                    }
+                    else
+                    {
+                        <p>No active reservation. Approval is not possible.</p>
+                    }
+                </section>
+                <section aria-labelledby="review-title">
+                    <h3 id="review-title">Eligibility outcome</h3>
+                    <dl class="dl">
+                        <dt>Reviewed by</dt><dd>@(r.ReviewedBy ?? "—")</dd>
+                        <dt>Registry evidence</dt><dd>@(r.RegistryResult ?? "None recorded")</dd>
+                        @if (r.ReviewOverride)
+                        {
+                            <dt>Override</dt><dd><span class="tag">Registry override recorded</span> @(c.Reviews.FirstOrDefault(x => x.RegistryOverride)?.OverrideReason)</dd>
+                        }
+                    </dl>
+                </section>
+            </div>
+
+            <div class="stack">
+                <section aria-labelledby="checks-title">
+                    <h3 id="checks-title">Approval checks</h3>
+                    <ul class="checks" data-testid="approval-checks">
+                        <li class="@(r.SeparationOfDuties ? "is-bad" : "is-ok")" data-testid="check-sod">
+                            <strong>Separation of duties:</strong>
+                            @(r.SeparationOfDuties ? "Blocked. You recorded an eligibility review on this case." : "Passed. You did not review this case.")
+                        </li>
+                        <li class="@(r.CalendarReconciled ? "is-ok" : "is-bad")" data-testid="check-calendar">
+                            <strong>Regional calendar:</strong>
+                            @(r.CalendarReconciled ? "Reconciled for this slot." : $"Not reconciled. {r.CalendarBlock}")
+                        </li>
+                        <li class="@(r.SevereWeather && !r.WeatherAcknowledged ? "is-warn" : "is-ok")" data-testid="check-weather">
+                            <strong>Weather:</strong> @WeatherText(r)
+                        </li>
+                    </ul>
+                    @if (!r.CalendarReconciled && Me?.Can(Cap.SyncCalendar) == true)
+                    {
+                        <button type="button" class="btn" disabled="@Busy" @onclick="SyncCalendarAsync" data-testid="calendar-sync">Run calendar sync now</button>
+                        <p class="field__hint">A successful sync after the hold was pushed confirms the slot against current regional events (A-18).</p>
+                    }
+                </section>
+
+                @if (r.SeparationOfDuties)
+                {
+                    <p class="notice" id="sod-note" role="note" data-testid="sod-notice">
+                        Separation of duties: you recorded an eligibility review on this case, so another Operations Manager must approve or reject it.
+                        The server refuses the decision (HTTP 403) even if it is sent directly.
+                    </p>
+                }
+
+                <form class="form decision" @onsubmit="SubmitAsync" novalidate data-testid="approval-form" aria-labelledby="decision-title">
+                    <h3 id="decision-title">Decision</h3>
+                    <fieldset disabled="@r.SeparationOfDuties">
+                        <legend>Outcome</legend>
+                        <div class="check"><input type="radio" id="a-approve" name="outcome" checked="@(_decision == "approve")" @onchange="@(() => Choose("approve"))" data-testid="decision-approve" /><label for="a-approve">Approve (T8)</label></div>
+                        <div class="check"><input type="radio" id="a-reject" name="outcome" checked="@(_decision == "reject")" @onchange="@(() => Choose("reject"))" data-testid="decision-reject" /><label for="a-reject">Reject (T9) and release the reservation</label></div>
+                    </fieldset>
+                    @if (_decision == "approve")
+                    {
+                        <div class="field">
+                            <label for="approve-notes">Decision notes (optional)</label>
+                            <textarea id="approve-notes" @bind="_notes" disabled="@r.SeparationOfDuties" aria-invalid="@Invalid("notes")" aria-describedby="@Describe("notes", "approve-notes", hint: true)" data-testid="approve-notes"></textarea>
+                            <span class="field__hint" id="approve-notes-hint">Up to @Limits.ReasonMax characters; stored with your name and the time as the sign-off record.</span>
+                            <FieldError Problem="Problem" Field="notes" Id="approve-notes" />
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="field">
+                            <label for="reject-reason">Rejection reason</label>
+                            <textarea id="reject-reason" @bind="_reason" disabled="@r.SeparationOfDuties" aria-invalid="@Invalid("reason")" aria-describedby="@Describe("reason", "reject-reason", hint: true)" data-testid="reject-reason"></textarea>
+                            <span class="field__hint" id="reject-reason-hint">@Limits.ReasonMin to @Limits.ReasonMax characters. The venue hold, resources and regional calendar hold are released.</span>
+                            <FieldError Problem="Problem" Field="reason" Id="reject-reason" />
+                        </div>
+                    }
+                    <div class="row">
+                        <button type="submit" class="btn @(_decision == "reject" ? "btn--danger" : "btn--primary")" disabled="@(Busy || r.SeparationOfDuties)"
+                                aria-describedby="@(r.SeparationOfDuties ? "sod-note" : null)" data-testid="approval-submit">
+                            @(_decision == "reject" ? "Reject application" : "Approve application")
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </section>
+}
+
+<section aria-labelledby="queue-title">
+    <h2 id="queue-title">Pending approval</h2>
+    @if (Loading && _rows is null)
+    {
+        <p role="status">Loading the approval queue…</p>
+    }
+    else if (_rows is { Count: 0 })
+    {
+        <EmptyState Title="Nothing is waiting for approval">
+            <p>Cases arrive here when a Scheduling Officer submits a complete reservation for approval.</p>
+        </EmptyState>
+    }
+    else if (_rows is not null)
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="approval-queue">
+                    <caption>@Ui.Plural(_rows.Count, "case", "cases") pending approval, earliest event first</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Case</th>
+                            <th scope="col">Venue and time</th>
+                            <th scope="col">Review</th>
+                            <th scope="col">Registry</th>
+                            <th scope="col">Calendar</th>
+                            <th scope="col">Weather</th>
+                            <th scope="col"><span class="visually-hidden">Action</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _rows)
+                        {
+                            <tr data-testid="approval-row" data-reference="@r.Reference" class="@(r.Id == CaseId ? "is-selected" : null)">
+                                <td data-label="Case"><strong>@r.Reference</strong><br />@r.Title<br /><span class="muted">@r.Applicant</span></td>
+                                <td data-label="Venue and time">@(r.Venue ?? "—")<br /><span class="muted">@(r.StartUtc is { } st ? Local(st, r.TimeZoneId) : "—") · @(r.Attendees?.ToString() ?? "—") attendees</span></td>
+                                <td data-label="Review">
+                                    @(r.ReviewedBy ?? "—")
+                                    @if (r.ReviewOverride)
+                                    {
+                                        <br /><span class="tag">Override</span>
+                                    }
+                                    @if (r.SeparationOfDuties)
+                                    {
+                                        <br /><span class="chip chip--attention" data-testid="sod-flag">You reviewed this case</span>
+                                    }
+                                </td>
+                                <td data-label="Registry">@(r.RegistryResult ?? "None")</td>
+                                <td data-label="Calendar">
+                                    <span class="chip @(r.CalendarReconciled ? "chip--good" : "chip--bad")" data-testid="calendar-chip">@(r.CalendarReconciled ? "Reconciled" : "Blocked")</span>
+                                    @if (!r.CalendarReconciled)
+                                    {
+                                        <br /><span class="muted">@r.CalendarBlock</span>
+                                    }
+                                </td>
+                                <td data-label="Weather">
+                                    <span class="chip @(r.SevereWeather ? (r.WeatherAcknowledged ? "chip--attention" : "chip--bad") : "chip--outline")">@(r.SevereWeather ? (r.WeatherAcknowledged ? "Severe, acknowledged" : "Severe advisory") : "No severe advisory")</span>
+                                </td>
+                                <td data-label="Action"><a class="btn btn--small btn--primary" href="@($"/approvals?case={r.Id}")" data-testid="approval-open">Decide<span class="visually-hidden"> on @r.Reference</span></a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "case")] public Guid? CaseId { get; set; }
+
+    private IReadOnlyList<ApprovalRow>? _rows;
+    private ApprovalRow? _row;
+    private CaseDetail? _case;
+    private Guid? _opened;
+    private ApprovalRow? _freshRow;
+
+    private string _decision = "approve";
+    private string? _notes, _reason;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!RendererInfo.IsInteractive) return;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (Problem?.StatusCode != 409) Problem = null;
+        await LoadAsync(async actor =>
+        {
+            _rows = await ApprovalSvc.QueueAsync(actor);
+            _row = CaseId is { } id ? _rows.FirstOrDefault(r => r.Id == id) : null;
+            _case = _row is null ? null : await CaseSvc.GetAsync(actor, _row.Id);
+            if (_row?.Id != _opened)
+            {
+                _decision = "approve";
+                _notes = _reason = null;
+                ConflictRows = null;
+                if (_row is not null) FocusAfterRender("#decide-title");
+            }
+            _opened = _row?.Id;
+        });
+    }
+
+    private void Choose(string decision)
+    {
+        _decision = decision;
+        if (Problem?.StatusCode == 400) Problem = null;
+    }
+
+    private async Task SyncCalendarAsync()
+    {
+        CalendarSyncRun? run = null;
+        if (await RunAsync(async actor => run = await CalendarSvc.SyncNowAsync(actor)))
+        {
+            await ReloadAsync();
+            Announcement = run!.Succeeded
+                ? $"Calendar sync finished: {run.Imported} imported, {run.Updated} updated. {(_row?.CalendarReconciled == true ? "The slot is reconciled." : "The slot is still blocked: " + _row?.CalendarBlock)}"
+                : $"Calendar sync failed: {run.Error}. Approval stays blocked until a sync succeeds.";
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (_row is null) return;
+        var checks = _decision == "reject"
+            ? new FieldChecks().Text("reason", _reason, Limits.ReasonMin, Limits.ReasonMax, "Rejection reason")
+            : new FieldChecks().Text("notes", _notes, 0, Limits.ReasonMax, "Decision notes", false);
+        if (ClientInvalid(checks)) return;
+        var r = _row;
+        var reject = _decision == "reject";
+        var ok = await RunAsync(async actor =>
+        {
+            if (reject) await ApprovalSvc.RejectAsync(actor, r.Id, r.Version, _reason);
+            else await ApprovalSvc.ApproveAsync(actor, r.Id, r.Version, _notes);
+        }, reject
+            ? $"{r.Reference} rejected (T9). The reservation, resources and calendar hold were released and the coordinator is notified."
+            : $"{r.Reference} approved (T8). Your sign-off is recorded; the permit can now be issued in the Permit Center.");
+        if (ok)
+        {
+            ConflictRows = null;
+            _opened = null;
+            Nav.NavigateTo("/approvals");
+            FocusAfterRender("#queue-title");
+        }
+        else if (IsConflict)
+        {
+            await BuildConflictAsync(r);
+        }
+    }
+
+    private async Task BuildConflictAsync(ApprovalRow mine)
+    {
+        try
+        {
+            var actor = await GetActorAsync();
+            _freshRow = (await ApprovalSvc.QueueAsync(actor)).FirstOrDefault(x => x.Id == mine.Id);
+        }
+        catch (AppException)
+        {
+            _freshRow = null;
+        }
+        ConflictRows =
+        [
+            new("Case status", _freshRow is null ? "no longer pending approval" : "Pending approval", "Pending approval"),
+            new("Record version", _freshRow?.Version.ToString(), mine.Version.ToString()),
+            new("Regional calendar", _freshRow is null ? null : _freshRow.CalendarReconciled ? "Reconciled" : "Blocked", mine.CalendarReconciled ? "Reconciled" : "Blocked"),
+            new("Weather", _freshRow is null ? null : WeatherText(_freshRow), WeatherText(mine)),
+            new("Your decision", null, _decision == "reject" ? $"Reject: {_reason}" : $"Approve{(string.IsNullOrWhiteSpace(_notes) ? "" : ": " + _notes)}"),
+        ];
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        Problem = null;
+        ConflictRows = null;
+        _opened = null;
+        await ReloadAsync();
+    }
+
+    private async Task ReapplyAsync()
+    {
+        if (_freshRow is null) return;
+        _row = _freshRow;
+        _freshRow = null;
+        ConflictRows = null;
+        Problem = null;
+        await SubmitAsync();
+    }
+
+    private static string WeatherText(ApprovalRow r) => r.SevereWeather
+        ? r.WeatherAcknowledged ? "Severe advisory, acknowledged by a manager." : "Severe advisory in force; it must be acknowledged before the permit is issued (A-19)."
+        : "No severe advisory recorded for the event date.";
+
+    private static string CalendarState(CalendarPushState state) => state switch
+    {
+        CalendarPushState.Pushed => "Hold pushed",
+        CalendarPushState.Pending => "Push pending",
+        CalendarPushState.Conflict => "Conflict reported",
+        CalendarPushState.Failed => "Push failed",
+        _ => "Not pushed",
+    };
+}

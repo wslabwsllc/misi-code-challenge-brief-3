@@ -1,0 +1,287 @@
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject AdminService Admin
+
+<section class="card card--flush ur-section" id="users" aria-labelledby="users-title" data-testid="ur-users">
+    <div class="ur-section__head">
+        <h2 id="users-title">Accounts and roles</h2>
+        <p class="muted">Accounts are never deleted: deactivate or lock them. Every change needs a reason and is audited. A user may hold several roles.</p>
+    </div>
+    <div class="ur-pad">
+        <ProblemAlert Problem="@(_form is null ? Problem : null)" OnRetry="SearchAsync" />
+        <LiveRegion Message="@Announcement" />
+    </div>
+
+    <form class="filters ur-filters" @onsubmit="SearchAsync" @onsubmit:preventDefault novalidate>
+        <div class="field">
+            <label for="user-search">Search by name or user name</label>
+            <input id="user-search" @bind="_search" maxlength="80" autocomplete="off" data-testid="user-search" />
+        </div>
+        <div class="field"><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="user-search-submit">Search</button></div>
+    </form>
+
+    @if (Loading && _users.Count == 0)
+    {
+        <p class="muted ur-pad" role="status">Loading accounts…</p>
+    }
+    else if (_users.Count == 0)
+    {
+        <div class="ur-pad"><EmptyState Title="No accounts match" /></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact">
+                <caption class="visually-hidden">Staff accounts</caption>
+                <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Roles</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                <tbody>
+                    @foreach (var u in _users)
+                    {
+                        <tr data-testid="@($"user-row-{u.UserName}")">
+                            <td data-label="Name"><strong>@u.DisplayName</strong><br /><span class="mono muted">@u.UserName</span></td>
+                            <td data-label="Email" class="ur-wrap">@u.Email</td>
+                            <td data-label="Roles">
+                                <span class="ur-chips">
+                                    @foreach (var r in u.Roles)
+                                    {
+                                        <span class="chip chip--outline">@Roles.Display(r)</span>
+                                    }
+                                </span>
+                            </td>
+                            <td data-label="Status" data-testid="@($"user-status-{u.UserName}")">
+                                <span class="ur-chips">
+                                    <span class="chip @(u.IsActive ? "chip--good" : "chip--bad")">@(u.IsActive ? "Active" : "Inactive")</span>
+                                    @if (IsLocked(u))
+                                    {
+                                        <span class="chip chip--attention">Locked@(u.LockoutEnd!.Value.Year < 9000 ? $" until {Ui.Utc(u.LockoutEnd.Value)}" : "")</span>
+                                    }
+                                </span>
+                            </td>
+                            <td data-label="Actions">
+                                <button type="button" class="btn btn--small" @onclick="() => Select(u)" aria-expanded="@(_selected?.Id == u.Id ? "true" : "false")" aria-controls="user-manage" data-testid="@($"user-manage-{u.UserName}")">Manage<span class="visually-hidden"> @u.DisplayName</span></button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (_selected is { } sel)
+    {
+        <div class="ur-panel" id="user-manage" data-testid="user-manage-panel">
+            <h3 id="user-manage-title" tabindex="-1">Manage @sel.DisplayName (<span class="mono">@sel.UserName</span>)</h3>
+            <ProblemAlert Problem="@(_form == "manage" ? Problem : null)" />
+            <div class="form">
+                <div class="field">
+                    <label for="manage-reason">Reason for the change</label>
+                    <textarea id="manage-reason" @bind="_reason" maxlength="@Limits.ReasonMax" aria-invalid="@Err("manage", "reason")" aria-describedby="manage-reason-hint manage-reason-error" data-testid="manage-reason"></textarea>
+                    <span id="manage-reason-hint" class="field__hint">At least @Limits.ReasonMin characters. Recorded in the audit log.</span>
+                    <span id="manage-reason-error" class="field__error" data-testid="manage-reason-error">@ErrText("manage", "reason")</span>
+                </div>
+                <div class="row">
+                    @if (sel.IsActive)
+                    {
+                        <button type="button" class="btn btn--danger" disabled="@Busy" @onclick="() => SetActiveAsync(false)" data-testid="manage-deactivate">Deactivate account</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn" disabled="@Busy" @onclick="() => SetActiveAsync(true)" data-testid="manage-activate">Activate account</button>
+                    }
+                    @if (IsLocked(sel))
+                    {
+                        <button type="button" class="btn" disabled="@Busy" @onclick="() => SetLockAsync(false)" data-testid="manage-unlock">Unlock account</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn" disabled="@Busy" @onclick="() => SetLockAsync(true)" data-testid="manage-lock">Lock account</button>
+                    }
+                </div>
+                <fieldset>
+                    <legend>Roles</legend>
+                    <div class="row ur-role-row">
+                        <div class="field">
+                            <label for="manage-role">Role</label>
+                            <select id="manage-role" @bind="_role" aria-invalid="@Err("manage", "role")" aria-describedby="manage-role-error" data-testid="manage-role">
+                                <option value="">Choose a role</option>
+                                @foreach (var r in Roles.All)
+                                {
+                                    <option value="@r">@Roles.Display(r)@(sel.Roles.Contains(r) ? " (held)" : "")</option>
+                                }
+                            </select>
+                            <span id="manage-role-error" class="field__error">@ErrText("manage", "role")</span>
+                        </div>
+                        <button type="button" class="btn" disabled="@Busy" @onclick="() => SetRoleAsync(true)" data-testid="manage-grant">Grant role</button>
+                        <button type="button" class="btn" disabled="@Busy" @onclick="() => SetRoleAsync(false)" data-testid="manage-remove">Remove role</button>
+                    </div>
+                </fieldset>
+                <div><button type="button" class="btn btn--quiet" @onclick="CloseManage">Close</button></div>
+            </div>
+        </div>
+    }
+
+    <details class="ur-panel" open="@_createOpen" data-testid="user-create">
+        <summary @onclick="ToggleCreate" @onclick:preventDefault>Create an account</summary>
+        <ProblemAlert Problem="@(_form == "create" ? Problem : null)" />
+        <form class="form" @onsubmit="CreateAsync" @onsubmit:preventDefault novalidate>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="new-username">User name</label>
+                    <input id="new-username" @bind="_new.UserName" autocomplete="off" maxlength="40" aria-invalid="@Err("create", "userName")" aria-describedby="new-username-hint new-username-error" data-testid="new-username" />
+                    <span id="new-username-hint" class="field__hint">Lower-case letters, digits, dots, dashes or underscores.</span>
+                    <span id="new-username-error" class="field__error" data-testid="new-username-error">@ErrText("create", "userName")</span>
+                </div>
+                <div class="field">
+                    <label for="new-display">Display name</label>
+                    <input id="new-display" @bind="_new.DisplayName" maxlength="120" aria-invalid="@Err("create", "displayName")" aria-describedby="new-display-error" data-testid="new-display" />
+                    <span id="new-display-error" class="field__error">@ErrText("create", "displayName")</span>
+                </div>
+                <div class="field">
+                    <label for="new-email">Email</label>
+                    <input id="new-email" type="email" @bind="_new.Email" maxlength="254" aria-invalid="@Err("create", "email")" aria-describedby="new-email-error" data-testid="new-email" />
+                    <span id="new-email-error" class="field__error">@ErrText("create", "email")</span>
+                </div>
+                <div class="field">
+                    <label for="new-password">Initial password</label>
+                    <input id="new-password" type="password" @bind="_new.Password" autocomplete="new-password" maxlength="128" aria-invalid="@Err("create", "initialPassword")" aria-describedby="new-password-hint new-password-error" data-testid="new-password" />
+                    <span id="new-password-hint" class="field__hint">At least 12 characters; share it with the person outside this system.</span>
+                    <span id="new-password-error" class="field__error">@ErrText("create", "initialPassword")</span>
+                </div>
+                <fieldset class="span-2" aria-describedby="new-roles-error">
+                    <legend>Roles</legend>
+                    <div class="ur-checks">
+                        @foreach (var r in Roles.All)
+                        {
+                            var id = $"new-role-{r}";
+                            <label class="check" for="@id"><input id="@id" type="checkbox" checked="@_new.Roles.Contains(r)" @onchange="e => ToggleRole(r, e.Value is true)" data-testid="@id" /> @Roles.Display(r)</label>
+                        }
+                    </div>
+                    <span id="new-roles-error" class="field__error">@ErrText("create", "roles")</span>
+                </fieldset>
+            </div>
+            <div><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="new-submit">Create account</button></div>
+        </form>
+    </details>
+</section>
+
+@code {
+    private sealed class NewUser
+    {
+        public string? UserName { get; set; }
+        public string? DisplayName { get; set; }
+        public string? Email { get; set; }
+        public string? Password { get; set; }
+        public HashSet<string> Roles { get; } = [];
+    }
+
+    private IReadOnlyList<UserRow> _users = [];
+    private string _search = "";
+    private UserRow? _selected;
+    private string _reason = "";
+    private string _role = "";
+    private string? _form;
+    private bool _createOpen;
+    private NewUser _new = new();
+
+    protected override Task OnInitializedAsync() => LoadAsync(LoadUsersAsync);
+
+    private async Task LoadUsersAsync(Actor actor)
+    {
+        _users = await Admin.UsersAsync(actor, _search);
+        if (_selected is not null) _selected = _users.FirstOrDefault(u => u.Id == _selected.Id);
+    }
+
+    private bool IsLocked(UserRow u) => u.LockoutEnd is { } end && end > Clock.GetUtcNow();
+
+    private async Task SearchAsync()
+    {
+        _form = null;
+        await RunAsync(LoadUsersAsync);
+    }
+
+    private async Task Select(UserRow u)
+    {
+        _selected = u;
+        _reason = "";
+        _role = "";
+        _form = null;
+        Problem = null;
+        await Task.Yield();
+        StateHasChanged();
+        await Js.InvokeVoidAsync("eventPermits.focus", "#user-manage-title");
+    }
+
+    private void CloseManage()
+    {
+        _selected = null;
+        _form = null;
+        Problem = null;
+    }
+
+    private async Task SetActiveAsync(bool active)
+    {
+        if (_selected is not { } u) return;
+        _form = "manage";
+        if (await RunAsync(async actor =>
+            {
+                await Admin.SetActiveAsync(actor, u.Id, active, _reason);
+                await LoadUsersAsync(actor);
+            }, $"{u.UserName} {(active ? "activated" : "deactivated")}."))
+            _reason = "";
+    }
+
+    private async Task SetLockAsync(bool locked)
+    {
+        if (_selected is not { } u) return;
+        _form = "manage";
+        if (await RunAsync(async actor =>
+            {
+                await Admin.SetLockAsync(actor, u.Id, locked, _reason);
+                await LoadUsersAsync(actor);
+            }, $"{u.UserName} {(locked ? "locked" : "unlocked")}."))
+            _reason = "";
+    }
+
+    private async Task SetRoleAsync(bool grant)
+    {
+        if (_selected is not { } u) return;
+        _form = "manage";
+        var role = _role;
+        if (await RunAsync(async actor =>
+            {
+                await Admin.SetRoleAsync(actor, u.Id, role, grant, _reason);
+                await LoadUsersAsync(actor);
+            }, $"{Roles.Display(role)} {(grant ? "granted to" : "removed from")} {u.UserName}."))
+        {
+            _reason = "";
+            _role = "";
+        }
+    }
+
+    private void ToggleCreate() => _createOpen = !_createOpen;
+
+    private void ToggleRole(string role, bool on)
+    {
+        if (on) _new.Roles.Add(role);
+        else _new.Roles.Remove(role);
+    }
+
+    private async Task CreateAsync()
+    {
+        _form = "create";
+        var input = new NewUserInput(_new.UserName, _new.DisplayName, _new.Email, _new.Roles.ToList(), _new.Password);
+        var name = _new.UserName?.Trim();
+        if (await RunAsync(async actor =>
+            {
+                await Admin.CreateUserAsync(actor, input);
+                await LoadUsersAsync(actor);
+            }, $"Account {name} created."))
+        {
+            _new = new NewUser();
+            _form = null;
+        }
+    }
+
+    private string? Err(string form, string field) => _form == form ? Invalid(field) : null;
+    private string? ErrText(string form, string field) => _form == form && Problem?.For(field) is { Length: > 0 } m ? string.Join(" ", m) : null;
+}

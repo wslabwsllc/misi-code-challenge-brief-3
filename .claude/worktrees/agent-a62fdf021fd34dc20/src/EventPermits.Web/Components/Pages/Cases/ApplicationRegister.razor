@@ -1,0 +1,445 @@
+@page "/applications"
+@attribute [Authorize(Policy = Cap.ViewRegister)]
+@rendermode InteractiveServer
+@inherits CasesPage
+@using EventPermits.Application.Services
+@inject RegisterService Register
+@inject CaseService Cases
+
+<PageTitle>Application Register · Memorial Event Operations</PageTitle>
+<PageHeader Title="Application Register" Lead="Every case you may see, 20 per page. Filters, sort and page live in the address, so a link reopens the same view.">
+    <Actions>
+        @if (Me?.Can(Cap.CreateApplication) == true)
+        {
+            <a class="btn btn--primary" href="applications/new" data-testid="register-new">New application</a>
+        }
+        @if (Me?.Can(Cap.ExportRegister) == true)
+        {
+            <a class="btn" href="@ExportUrl" download data-testid="register-export">Export CSV<span class="visually-hidden"> of the filtered result</span></a>
+        }
+    </Actions>
+</PageHeader>
+<ProblemAlert Problem="Problem" OnRetry="Reload" />
+<InteractiveMarker />
+<LiveRegion Message="@Announcement" />
+
+<form class="filters" @onsubmit="Apply" novalidate data-testid="register-filters" aria-label="Filter the register">
+    <div class="field">
+        <label for="f-q">Search</label>
+        <input id="f-q" type="search" @bind="_f.Search" maxlength="100" placeholder="Reference, applicant or event" data-testid="filter-search" />
+    </div>
+    <div class="field">
+        <span class="register__label" id="f-status-label">Status</span>
+        <details class="status-filter" data-testid="filter-status">
+            <summary aria-describedby="f-status-label">@StatusSummary</summary>
+            <fieldset>
+                <legend class="visually-hidden">Statuses to include</legend>
+                @foreach (var s in Enum.GetValues<CaseStatus>())
+                {
+                    var id = $"f-st-{s}";
+                    <label class="check" for="@id">
+                        <input id="@id" type="checkbox" checked="@_f.Statuses.Contains(s)" @onchange="e => ToggleStatus(s, (bool)(e.Value ?? false))" />
+                        <span>@Workflow.Display(s)</span>
+                    </label>
+                }
+            </fieldset>
+        </details>
+        <FieldError For="status" Messages="@Errs("status")" />
+    </div>
+    <div class="field">
+        <label for="f-cemetery">Site</label>
+        <select id="f-cemetery" @bind="_f.CemeteryId" @bind:after="CemeteryChanged" data-testid="filter-cemetery">
+            <option value="">Any site</option>
+            @foreach (var c in Cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-venue">Venue</label>
+        <select id="f-venue" @bind="_f.VenueId" data-testid="filter-venue">
+            <option value="">Any venue</option>
+            @foreach (var v in (_lookups?.Venues ?? []).Where(v => _f.CemeteryId is null || v.CemeteryId == _f.CemeteryId))
+            {
+                <option value="@v.Id">@v.Name (@v.CemeteryName)</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-category">Event type</label>
+        <select id="f-category" @bind="_f.CategoryId" data-testid="filter-category">
+            <option value="">Any type</option>
+            @foreach (var c in _lookups?.Categories ?? [])
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-applicant">Applicant</label>
+        <input id="f-applicant" @bind="_f.Applicant" maxlength="120" placeholder="Name or organisation" data-testid="filter-applicant" />
+    </div>
+    <div class="field">
+        <label for="f-from">Event from</label>
+        <input id="f-from" type="date" @bind="_f.From" aria-invalid="@Invalid("from")" aria-describedby="@Describe("from")" data-testid="filter-from" />
+        <FieldError For="from" Messages="@Errs("from")" />
+    </div>
+    <div class="field">
+        <label for="f-to">Event to</label>
+        <input id="f-to" type="date" @bind="_f.To" aria-invalid="@Invalid("to")" aria-describedby="@Describe("to")" data-testid="filter-to" />
+        <FieldError For="to" Messages="@Errs("to")" />
+    </div>
+    <div class="field">
+        <label for="f-sort">Sort by</label>
+        <select id="f-sort" @bind="SortKey" data-testid="filter-sort">
+            @foreach (var (key, label) in SortOptions)
+            {
+                <option value="@key">@label</option>
+            }
+        </select>
+    </div>
+    @if (Me?.Has(Roles.IntakeCoordinator) == true)
+    {
+        <label class="check register__drafts" for="f-drafts">
+            <input id="f-drafts" type="checkbox" @bind="_f.MyDrafts" data-testid="filter-mydrafts" />
+            <span>Only my drafts</span>
+        </label>
+    }
+    <div class="row register__buttons">
+        <button type="submit" class="btn btn--primary" data-testid="filter-apply">Apply filters</button>
+        <a class="btn btn--quiet" href="applications" data-testid="filter-clear">Clear</a>
+    </div>
+</form>
+
+<div class="register__layout">
+    <section class="card card--flush" aria-labelledby="results-title">
+        <h2 id="results-title" class="visually-hidden">Results</h2>
+        @if (Loading && _page is null)
+        {
+            <p class="register__loading" role="status">Loading cases…</p>
+        }
+        else if (_page is { Total: 0 })
+        {
+            <EmptyState Title="@(HasFilters ? "No cases match these filters" : "No cases yet")">
+                @if (HasFilters)
+                {
+                    <p>Try fewer filters, or <a href="applications">clear them all</a>.</p>
+                }
+                else if (Me?.Can(Cap.CreateApplication) == true)
+                {
+                    <p><a href="applications/new">Start a new application</a> to create the first case.</p>
+                }
+                else
+                {
+                    <p>Cases appear here once intake coordinators submit them.</p>
+                }
+            </EmptyState>
+        }
+        else if (_page is not null)
+        {
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="register-table">
+                    <caption>@Ui.Plural(_page.Total, "case", "cases") match. Times are venue-local.</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col" aria-sort="@AriaSort(RegisterSort.Reference)"><button type="button" class="sort-btn" @onclick="() => SortBy(RegisterSort.Reference)" data-testid="sort-reference">Reference @Arrow(RegisterSort.Reference)</button></th>
+                            <th scope="col" aria-sort="@AriaSort(RegisterSort.Status)"><button type="button" class="sort-btn" @onclick="() => SortBy(RegisterSort.Status)">Status @Arrow(RegisterSort.Status)</button></th>
+                            <th scope="col" aria-sort="@AriaSort(RegisterSort.Applicant)"><button type="button" class="sort-btn" @onclick="() => SortBy(RegisterSort.Applicant)">Applicant @Arrow(RegisterSort.Applicant)</button></th>
+                            <th scope="col">Event</th>
+                            <th scope="col">Site and venue</th>
+                            <th scope="col" aria-sort="@AriaSort(RegisterSort.EventDate)"><button type="button" class="sort-btn" @onclick="() => SortBy(RegisterSort.EventDate)" data-testid="sort-eventdate">Event date @Arrow(RegisterSort.EventDate)</button></th>
+                            <th scope="col" aria-sort="@AriaSort(RegisterSort.Updated)"><button type="button" class="sort-btn" @onclick="() => SortBy(RegisterSort.Updated)">Updated @Arrow(RegisterSort.Updated)</button></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _page.Rows)
+                        {
+                            <tr data-testid="register-row" data-reference="@r.Reference">
+                                <td data-label="Reference">
+                                    <a href="@($"applications/{r.Id}")" data-testid="register-open">@r.Reference</a>
+                                    @if (r.Status == CaseStatus.Draft && Me?.Can(Cap.CreateApplication) == true)
+                                    {
+                                        <a class="register__resume" href="@($"applications/new/{r.Id}/step/1")">Continue draft<span class="visually-hidden"> @r.Reference</span></a>
+                                    }
+                                </td>
+                                <td data-label="Status"><StatusChip Status="r.Status" /></td>
+                                <td data-label="Applicant">@Blank(r.ApplicantName)</td>
+                                <td data-label="Event">@Blank(r.Title)<br /><span class="muted">@(r.Category ?? "Type not chosen")</span></td>
+                                <td data-label="Site and venue">@(r.Venue is null ? "Not chosen" : $"{r.Venue}, {r.Cemetery}")</td>
+                                <td data-label="Event date">@(r.StartUtc is { } s ? Local(s, r.TimeZoneId) : "Not set")</td>
+                                <td data-label="Updated">@Ui.Utc(r.UpdatedAt)<br /><span class="muted">by owner @r.OwnerName</span></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="_page.Page" PageSize="_page.PageSize" Total="_page.Total" OnPage="GoToPage" />
+        }
+    </section>
+
+    <aside class="card register__views" aria-labelledby="views-title" data-testid="saved-views">
+        <h2 id="views-title">Saved views</h2>
+        <p class="muted">Your own named filter sets. Only you can see them.</p>
+        @if (_views.Count == 0)
+        {
+            <p data-testid="views-empty">No saved views yet. Set filters above, then save them here.</p>
+        }
+        else
+        {
+            <ul class="register__view-list">
+                @foreach (var v in _views)
+                {
+                    <li data-testid="saved-view">
+                        @if (_renaming == v.Id)
+                        {
+                            <form class="form" @onsubmit="() => RenameAsync(v)" novalidate>
+                                <div class="field">
+                                    <label for="rename-@v.Id">New name for “@v.Name”</label>
+                                    <input id="rename-@v.Id" @bind="_renameName" maxlength="60" aria-invalid="@Invalid("name")" aria-describedby="@Describe("name")" data-testid="view-rename-input" />
+                                    <FieldError For="name" Messages="@Errs("name")" />
+                                </div>
+                                <div class="row">
+                                    <button type="submit" class="btn btn--primary btn--small" disabled="@Busy" data-testid="view-rename-save">Save name</button>
+                                    <button type="button" class="btn btn--small" @onclick="() => _renaming = null">Cancel</button>
+                                </div>
+                            </form>
+                        }
+                        else
+                        {
+                            <a href="@($"applications?{v.Query}")" data-testid="view-open">@v.Name</a>
+                            <div class="row">
+                                <button type="button" class="btn btn--small" @onclick="() => StartRename(v)" data-testid="view-rename">Rename<span class="visually-hidden"> @v.Name</span></button>
+                                <button type="button" class="btn btn--small" @onclick="() => DeleteAsync(v)" disabled="@Busy" data-testid="view-delete">Delete<span class="visually-hidden"> @v.Name</span></button>
+                            </div>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+        @if (_renaming is null)
+        {
+            <form class="form" @onsubmit="SaveViewAsync" novalidate data-testid="view-save-form">
+                <div class="field">
+                    <label for="view-name">Save the current filters as</label>
+                    <input id="view-name" @bind="_newViewName" maxlength="60" aria-invalid="@Invalid("name")" aria-describedby="@Describe("name", "view-name-hint")" data-testid="view-name" />
+                    <span class="field__hint" id="view-name-hint">2 to 60 characters, unique among your views.</span>
+                    <FieldError For="name" Messages="@Errs("name")" />
+                </div>
+                <button type="submit" class="btn" disabled="@Busy" data-testid="view-save">Save view</button>
+            </form>
+        }
+    </aside>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
+    [SupplyParameterFromQuery(Name = "status")] public string? StatusParam { get; set; }
+    [SupplyParameterFromQuery(Name = "cemeteryId")] public Guid? CemeteryParam { get; set; }
+    [SupplyParameterFromQuery(Name = "venueId")] public Guid? VenueParam { get; set; }
+    [SupplyParameterFromQuery(Name = "categoryId")] public Guid? CategoryParam { get; set; }
+    [SupplyParameterFromQuery(Name = "applicant")] public string? ApplicantParam { get; set; }
+    [SupplyParameterFromQuery(Name = "from")] public string? FromParam { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToParam { get; set; }
+    [SupplyParameterFromQuery(Name = "sort")] public string? SortParam { get; set; }
+    [SupplyParameterFromQuery(Name = "desc")] public bool? DescParam { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+    [SupplyParameterFromQuery(Name = "myDrafts")] public bool? MyDraftsParam { get; set; }
+
+    private sealed class FilterModel
+    {
+        public string? Search { get; set; }
+        public HashSet<CaseStatus> Statuses { get; set; } = [];
+        public Guid? CemeteryId { get; set; }
+        public Guid? VenueId { get; set; }
+        public Guid? CategoryId { get; set; }
+        public string? Applicant { get; set; }
+        public DateOnly? From { get; set; }
+        public DateOnly? To { get; set; }
+        public RegisterSort Sort { get; set; } = RegisterSort.Updated;
+        public bool Desc { get; set; } = true;
+        public bool MyDrafts { get; set; }
+        public FilterModel Copy()
+        {
+            var copy = (FilterModel)MemberwiseClone();
+            copy.Statuses = [.. Statuses];
+            return copy;
+        }
+    }
+
+    private static readonly (string Key, string Label)[] SortOptions =
+    [
+        ("Updated-desc", "Recently updated first"), ("Updated-asc", "Least recently updated first"),
+        ("EventDate-asc", "Event date, soonest first"), ("EventDate-desc", "Event date, latest first"),
+        ("Reference-asc", "Reference A–Z"), ("Reference-desc", "Reference Z–A"),
+        ("Status-asc", "Status (workflow order)"), ("Applicant-asc", "Applicant A–Z"), ("Applicant-desc", "Applicant Z–A"),
+    ];
+
+    private FilterModel _applied = new();
+    private FilterModel _f = new();
+    private int _pageNumber = 1;
+    private IntakeLookups? _lookups;
+    private RegisterPage? _page;
+    private List<SavedViewDto> _views = [];
+    private string? _newViewName;
+    private Guid? _renaming;
+    private string? _renameName;
+
+    private IEnumerable<(Guid Id, string Name)> Cemeteries =>
+        (_lookups?.Venues ?? []).GroupBy(v => v.CemeteryId).Select(g => (g.Key, g.First().CemeteryName)).OrderBy(c => c.Item2);
+
+    private string SortKey
+    {
+        get => $"{_f.Sort}-{(_f.Desc ? "desc" : "asc")}";
+        set
+        {
+            var parts = value.Split('-');
+            if (Enum.TryParse<RegisterSort>(parts[0], out var s)) _f.Sort = s;
+            _f.Desc = parts.Length > 1 && parts[1] == "desc";
+        }
+    }
+
+    private string StatusSummary => _f.Statuses.Count switch
+    {
+        0 => "Any status",
+        1 => Workflow.Display(_f.Statuses.First()),
+        var n => $"{n} statuses selected",
+    };
+
+    private bool HasFilters => !string.IsNullOrWhiteSpace(_applied.Search) || _applied.Statuses.Count > 0 || _applied.CemeteryId is not null || _applied.VenueId is not null
+                               || _applied.CategoryId is not null || !string.IsNullOrWhiteSpace(_applied.Applicant) || _applied.From is not null || _applied.To is not null || _applied.MyDrafts;
+
+    private string ExportUrl => "api/applications/export.csv" + QueryString(_applied, null, includePaging: false);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        Problem = null;
+        _applied = FromUrl();
+        _f = _applied.Copy();
+        _pageNumber = Math.Clamp(PageParam ?? 1, 1, 10_000);
+        await Reload();
+    }
+
+    private async Task Reload() => await LoadAsync(async actor =>
+    {
+        _lookups ??= await Cases.LookupsAsync(actor);
+        if (Problem is not null) return; // an unknown status in the link: show the problem, not a misleading list
+        _page = await Register.ListAsync(actor, ToQuery(_applied, _pageNumber));
+        _views = (await Register.ViewsAsync(actor)).ToList();
+    });
+
+    private FilterModel FromUrl()
+    {
+        var f = new FilterModel
+        {
+            Search = Q, CemeteryId = CemeteryParam, VenueId = VenueParam, CategoryId = CategoryParam, Applicant = ApplicantParam,
+            From = DateOnly.TryParse(FromParam, CultureInfo.InvariantCulture, out var from) ? from : null,
+            To = DateOnly.TryParse(ToParam, CultureInfo.InvariantCulture, out var to) ? to : null,
+            Sort = Enum.TryParse<RegisterSort>(SortParam, true, out var sort) ? sort : RegisterSort.Updated,
+            Desc = DescParam ?? (sort == RegisterSort.Updated), MyDrafts = MyDraftsParam ?? false,
+        };
+        foreach (var s in (StatusParam ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (Enum.TryParse<CaseStatus>(s, true, out var st)) f.Statuses.Add(st);
+            else LocalError("status", $"Unknown status “{s}” in the link. Choose statuses from the list.");
+        }
+        return f;
+    }
+
+    private static RegisterQuery ToQuery(FilterModel f, int page) =>
+        new(f.Search, f.Statuses.Count > 0 ? f.Statuses.ToArray() : null, f.CemeteryId, f.VenueId, f.CategoryId, f.Applicant, f.From, f.To, f.Sort, f.Desc, page, f.MyDrafts);
+
+    private static string QueryString(FilterModel f, int? page, bool includePaging = true)
+    {
+        var parts = new List<string>();
+        void Add(string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) parts.Add($"{key}={Uri.EscapeDataString(value.Trim())}");
+        }
+        Add("q", f.Search);
+        Add("status", string.Join(',', f.Statuses.OrderBy(s => s)));
+        Add("cemeteryId", f.CemeteryId?.ToString());
+        Add("venueId", f.VenueId?.ToString());
+        Add("categoryId", f.CategoryId?.ToString());
+        Add("applicant", f.Applicant);
+        Add("from", f.From?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        Add("to", f.To?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        if (f.MyDrafts) Add("myDrafts", "true");
+        if (f.Sort != RegisterSort.Updated || !f.Desc)
+        {
+            Add("sort", f.Sort.ToString());
+            Add("desc", f.Desc ? "true" : "false");
+        }
+        if (includePaging && page is > 1) Add("page", page.Value.ToString(CultureInfo.InvariantCulture));
+        return parts.Count == 0 ? "" : "?" + string.Join('&', parts);
+    }
+
+    private void ToggleStatus(CaseStatus status, bool on)
+    {
+        if (on) _f.Statuses.Add(status);
+        else _f.Statuses.Remove(status);
+    }
+
+    private void CemeteryChanged()
+    {
+        if (_f.VenueId is { } v && _lookups?.Venues.FirstOrDefault(x => x.Id == v) is { } venue && venue.CemeteryId != _f.CemeteryId) _f.VenueId = null;
+    }
+
+    private void Apply()
+    {
+        if (_f.From is { } from && _f.To is { } to && to < from)
+        {
+            LocalError("to", "The end date must be on or after the start date.");
+            return;
+        }
+        Nav.NavigateTo("applications" + QueryString(_f, 1));
+    }
+
+    private void SortBy(RegisterSort sort)
+    {
+        var f = _applied.Copy();
+        f.Desc = f.Sort == sort ? !f.Desc : sort == RegisterSort.Updated;
+        f.Sort = sort;
+        Nav.NavigateTo("applications" + QueryString(f, 1));
+    }
+
+    private void GoToPage(int page) => Nav.NavigateTo("applications" + QueryString(_applied, page));
+
+    private string? AriaSort(RegisterSort sort) => _applied.Sort == sort ? (_applied.Desc ? "descending" : "ascending") : null;
+    private string Arrow(RegisterSort sort) => _applied.Sort == sort ? (_applied.Desc ? "▼" : "▲") : "";
+    private static string Blank(string value) => string.IsNullOrWhiteSpace(value) ? "Not entered" : value;
+
+    private async Task SaveViewAsync()
+    {
+        var query = QueryString(_applied, null, includePaging: false).TrimStart('?');
+        if (await RunAsync(async a =>
+            {
+                await Register.SaveViewAsync(a, null, _newViewName, query, null);
+                _views = (await Register.ViewsAsync(a)).ToList();
+            }, $"View “{_newViewName?.Trim()}” saved."))
+            _newViewName = null;
+    }
+
+    private void StartRename(SavedViewDto view)
+    {
+        Problem = null;
+        _renaming = view.Id;
+        _renameName = view.Name;
+    }
+
+    private async Task RenameAsync(SavedViewDto view)
+    {
+        if (await RunAsync(async a =>
+            {
+                await Register.SaveViewAsync(a, view.Id, _renameName, view.Query, view.Version);
+                _views = (await Register.ViewsAsync(a)).ToList();
+            }, $"View renamed to “{_renameName?.Trim()}”."))
+            _renaming = null;
+    }
+
+    private async Task DeleteAsync(SavedViewDto view) => await RunAsync(async a =>
+    {
+        await Register.DeleteViewAsync(a, view.Id);
+        _views = (await Register.ViewsAsync(a)).ToList();
+    }, $"View “{view.Name}” deleted.");
+}

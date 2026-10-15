@@ -1,0 +1,10 @@
+@* Field-level message linked from the control through aria-describedby="{For}-error" (UI-DESIGN forms pattern). *@
+@if (Messages.Count > 0)
+{
+    <p class="field__error" id="@($"{For}-error")" data-testid="@($"error-{For}")">@string.Join(" ", Messages)</p>
+}
+
+@code {
+    [Parameter, EditorRequired] public string For { get; set; } = "";
+    [Parameter] public IReadOnlyList<string> Messages { get; set; } = [];
+}

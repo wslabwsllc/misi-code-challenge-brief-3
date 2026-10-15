@@ -1,0 +1,786 @@
+@page "/venues/availability"
+@attribute [Authorize(Policy = Cap.ViewSchedule)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@implements IDisposable
+@inject SchedulingService Scheduling
+@inject AdminService Admin
+@inject CaseService Cases
+
+<PageTitle>Venue Availability · Memorial Event Operations</PageTitle>
+<PageHeader Title="Venue Availability" Lead="Opening hours, closures and bookings for one venue and day, with a live collision check that includes setup and teardown buffers." />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" />
+
+<form class="filters" @onsubmit="ApplyFilters" @onsubmit:preventDefault data-testid="avail-filters">
+    <div class="field">
+        <label for="f-cemetery">Cemetery</label>
+        <select id="f-cemetery" value="@(_cemeteryId?.ToString() ?? "")" @onchange="CemeteryChanged" data-testid="avail-cemetery">
+            <option value="">All cemeteries</option>
+            @foreach (var c in _venues.GroupBy(v => (v.CemeteryId, v.CemeteryName)))
+            {
+                <option value="@c.Key.CemeteryId">@c.Key.CemeteryName</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-venue">Venue</label>
+        <select id="f-venue" value="@(_venueId?.ToString() ?? "")" @onchange="VenueChanged" data-testid="avail-venue">
+            <option value="">Choose a venue</option>
+            @foreach (var v in _venues.Where(v => _cemeteryId is null || v.CemeteryId == _cemeteryId))
+            {
+                <option value="@v.Id">@v.Name (@v.CemeteryName)@(v.IsActive ? "" : " — inactive")</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-date">Date (venue-local)</label>
+        <input id="f-date" type="date" value="@Date(_date)" @onchange="DateChanged" data-testid="avail-date" />
+    </div>
+    <div class="row">
+        <button type="button" class="btn btn--small" @onclick="() => ShiftDay(-1)" aria-label="Previous day">‹ Previous day</button>
+        <button type="button" class="btn btn--small" @onclick="() => ShiftDay(1)" aria-label="Next day">Next day ›</button>
+    </div>
+</form>
+
+@if (Loading)
+{
+    <p class="muted" role="status">Loading availability…</p>
+}
+else if (Venue is null)
+{
+    <EmptyState Title="Choose a venue to see its day">
+        <p>Pick a cemetery and venue above. The timeline shows opening hours, closures, reservations with their buffers, regional calendar events and partner events.</p>
+    </EmptyState>
+}
+else
+{
+    <div class="split">
+        <div class="stack">
+            <section class="card" aria-labelledby="day-title" data-testid="avail-timeline">
+                <div class="row row--between">
+                    <h2 id="day-title">@Venue.Name · @_date.ToString("dddd d MMMM yyyy", Ui.Culture)</h2>
+                    <span class="muted">Times in @Ui.ShortZone(Venue.TimeZoneId) (@Venue.TimeZoneId)</span>
+                </div>
+                @if (_day?.Hours is { } hours)
+                {
+                    <p>Open <strong>@hours.Opens.ToString("HH:mm", Ui.Culture)–@hours.Closes.ToString("HH:mm", Ui.Culture)</strong>.
+                        Every booking also blocks @_day.SetupBuffer minutes before (setup) and @_day.TeardownBuffer minutes after (teardown).</p>
+                }
+                else
+                {
+                    <div class="alert alert--info" role="note"><p class="alert__title"><strong>Closed all day</strong></p><p>@Venue.Name has no opening hours on @_date.DayOfWeek. Choose another day.</p></div>
+                }
+
+                <div class="tl" aria-hidden="true">
+                    <div class="tl__scale">
+                        @foreach (var tick in Ticks())
+                        {
+                            <span class="tl__tick" style="left:@Pct(tick)%">@tick.ToString("HH:mm", Ui.Culture)</span>
+                        }
+                    </div>
+                    <div class="tl__track">
+                        @if (_day?.Hours is { } h)
+                        {
+                            <span class="tl__open" style="@Span(h.Opens, h.Closes)"></span>
+                        }
+                        @foreach (var item in _day?.Items ?? [])
+                        {
+                            <span class="tl__bar tl__bar--@KindClass(item.Kind)" style="@Span(item.StartUtc, item.EndUtc)" title="@KindLabel(item.Kind): @item.Label">@item.Label</span>
+                        }
+                        @if (_check is not null && LocalDate(_check.StartUtc, Venue.TimeZoneId) == _date)
+                        {
+                            <span class="tl__bar tl__bar--proposal @(_check.Conflicts.Count == 0 ? "is-free" : "is-blocked")" style="@Span(_check.BlockStartUtc, _check.BlockEndUtc)">Your proposal</span>
+                        }
+                    </div>
+                </div>
+                <ul class="legend" aria-label="Timeline legend">
+                    <li><span class="legend__swatch tl__bar--open"></span>Opening hours</li>
+                    <li><span class="legend__swatch tl__bar--reservation"></span>Reservation incl. buffers</li>
+                    <li><span class="legend__swatch tl__bar--blackout"></span>Closure</li>
+                    <li><span class="legend__swatch tl__bar--external"></span>Regional calendar event</li>
+                    <li><span class="legend__swatch tl__bar--partner"></span>Partner event</li>
+                    <li><span class="legend__swatch tl__bar--proposal"></span>Your proposal incl. buffers</li>
+                </ul>
+
+                @if (_day is null || _day.Items.Count == 0)
+                {
+                    <p class="muted" data-testid="avail-free-day">Nothing is booked or blocked at this venue on this day.</p>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table--compact table--cards">
+                            <caption>Everything that occupies @Venue.Name on this day (blocked times include buffers)</caption>
+                            <thead><tr><th scope="col">Kind</th><th scope="col">What</th><th scope="col">Blocked (local)</th><th scope="col">Status</th></tr></thead>
+                            <tbody>
+                                @foreach (var item in _day.Items)
+                                {
+                                    <tr data-testid="timeline-item" data-kind="@KindClass(item.Kind)">
+                                        <td data-label="Kind"><span class="tag">@KindLabel(item.Kind)</span></td>
+                                        <td data-label="What">
+                                            @if (item.ApplicationId is { } appId)
+                                            {
+                                                <a href="applications/detail?id=@appId">@item.Label</a>
+                                            }
+                                            else
+                                            {
+                                                @item.Label
+                                            }
+                                        </td>
+                                        <td data-label="Blocked">@Ui.LocalTime(item.StartUtc, Venue.TimeZoneId)–@Ui.LocalTime(item.EndUtc, Venue.TimeZoneId)</td>
+                                        <td data-label="Status">@if (item.Status is { } st) { <StatusChip Status="st" /> } else { <span class="muted">—</span> }</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+
+            <section class="card" aria-labelledby="facts-title">
+                <h2 id="facts-title">Venue facts</h2>
+                <dl class="dl">
+                    <dt>Cemetery</dt><dd>@Venue.CemeteryName</dd>
+                    <dt>Address</dt><dd>@Venue.Address</dd>
+                    <dt>Capacity</dt><dd>@Venue.Capacity.ToString("N0", Ui.Culture) attendees</dd>
+                    <dt>Buffers</dt><dd>@Venue.SetupBufferMinutes min setup · @Venue.TeardownBufferMinutes min teardown</dd>
+                    <dt>Categories</dt><dd>@(Venue.AllowedCategoryCodes.Count == 0 ? "Any" : string.Join(", ", Venue.AllowedCategoryCodes.Select(CategoryName)))</dd>
+                    <dt>Status</dt><dd>@if (Venue.IsActive) { <span class="chip chip--good">Active</span> } else { <span class="chip chip--bad">Inactive — not bookable</span> }</dd>
+                </dl>
+                <h3>Opening hours</h3>
+                <div class="table-wrap">
+                    <table class="table table--compact">
+                        <caption class="visually-hidden">Weekly opening hours, venue-local</caption>
+                        <thead><tr><th scope="col">Day</th><th scope="col">Hours</th></tr></thead>
+                        <tbody>
+                            @foreach (var day in Week)
+                            {
+                                var oh = Venue.OpeningHours.FirstOrDefault(o => o.Day == day);
+                                <tr class="@(day == _date.DayOfWeek ? "is-selected" : null)">
+                                    <th scope="row">@day@(day == _date.DayOfWeek ? " (selected)" : "")</th>
+                                    <td>@(oh is null ? "Closed" : $"{oh.Opens:HH\\:mm}–{oh.Closes:HH\\:mm}")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <h3>Upcoming closures</h3>
+                @if (_closures.Count == 0)
+                {
+                    <p class="muted">No active closures ahead.</p>
+                }
+                else
+                {
+                    <ul class="plain-list" data-testid="avail-closures">
+                        @foreach (var b in _closures)
+                        {
+                            <li><strong>@Ui.Local(b.StartUtc, b.TimeZoneId, "ddd d MMM, HH:mm")</strong> to @Ui.Local(b.EndUtc, b.TimeZoneId, "ddd d MMM, HH:mm") — @b.Reason</li>
+                        }
+                    </ul>
+                }
+            </section>
+        </div>
+
+        <section class="card" aria-labelledby="proposal-title" data-testid="proposal">
+            <h2 id="proposal-title">Propose a slot</h2>
+            <p class="muted">The check runs as you type and lists every problem, not just the first.</p>
+            <form class="form" @onsubmit="ReserveAsync" @onsubmit:preventDefault novalidate>
+                @if (CanReserve)
+                {
+                    <div class="field">
+                        <label for="p-case">Case to reserve</label>
+                        <select id="p-case" value="@(_p.CaseId?.ToString() ?? "")" @onchange="CaseChanged" aria-invalid="@Invalid("caseId")" aria-describedby="@Describe("caseId", "p-case-hint")" data-testid="proposal-case">
+                            <option value="">Choose an eligible case</option>
+                            @foreach (var c in _desk)
+                            {
+                                <option value="@c.Id">@c.Reference · @c.Title (@Workflow.Display(c.Status))</option>
+                            }
+                        </select>
+                        <span class="field__hint" id="p-case-hint">Eligible cases get a tentative reservation (T6); reserved cases can be moved until approval.</span>
+                        <FieldErrors Id="@ErrorId("caseId")" Messages="@(Errors("caseId"))" />
+                    </div>
+                }
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="p-date">Date</label>
+                        <input id="p-date" type="date" @bind="_p.Date" @bind:after="QueueCheck" aria-invalid="@Invalid("localDate")" aria-describedby="@Describe("localDate")" data-testid="proposal-date" />
+                        <FieldErrors Id="@ErrorId("localDate")" Messages="@(Errors("localDate"))" />
+                    </div>
+                    <div class="field">
+                        <label for="p-start">Start (local)</label>
+                        <input id="p-start" type="time" step="900" @bind="_p.Start" @bind:event="oninput" @bind:after="QueueCheck" aria-invalid="@Invalid("localStart")" aria-describedby="@Describe("localStart")" data-testid="proposal-start" />
+                        <FieldErrors Id="@ErrorId("localStart")" Messages="@(Errors("localStart"))" />
+                    </div>
+                    <div class="field">
+                        <label for="p-duration">Duration (minutes)</label>
+                        <input id="p-duration" type="number" min="1" step="15" inputmode="numeric" @bind="_p.Duration" @bind:event="oninput" @bind:after="QueueCheck"
+                               aria-invalid="@Invalid("durationMinutes")" aria-describedby="@Describe("durationMinutes")" data-testid="proposal-duration" />
+                        <FieldErrors Id="@ErrorId("durationMinutes")" Messages="@(Errors("durationMinutes"))" />
+                    </div>
+                    <div class="field">
+                        <label for="p-attendees">Attendees</label>
+                        <input id="p-attendees" type="number" min="1" inputmode="numeric" @bind="_p.Attendees" @bind:event="oninput" @bind:after="QueueCheck"
+                               aria-invalid="@Invalid("attendeeCount")" aria-describedby="@Describe("attendeeCount")" data-testid="proposal-attendees" />
+                        <FieldErrors Id="@ErrorId("attendeeCount")" Messages="@(Errors("attendeeCount"))" />
+                    </div>
+                    <div class="field span-2">
+                        <label for="p-category">Event category</label>
+                        <select id="p-category" @bind="_p.Category" @bind:after="QueueCheck" data-testid="proposal-category">
+                            <option value="">Not specified</option>
+                            @foreach (var c in _categories)
+                            {
+                                <option value="@c.Code">@c.Name</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+
+                @if (CanReserve)
+                {
+                    <fieldset>
+                        <legend>Resources from @Venue.CemeteryName stock</legend>
+                        <div class="form-grid">
+                            @foreach (var r in _resources.Where(r => r.CemeteryId == Venue.CemeteryId))
+                            {
+                                var key = $"resource-{r.Id}";
+                                <div class="field">
+                                    <label for="@key">@r.Name (@r.Unit, @r.Total in stock)</label>
+                                    <input id="@key" type="number" min="0" inputmode="numeric" value="@(_p.Qty.GetValueOrDefault(r.Id)?.ToString(Ui.Culture) ?? "")"
+                                           @oninput="e => QtyChanged(r.Id, e.Value?.ToString())" aria-invalid="@Invalid(key)" aria-describedby="@Describe(key)" data-testid="proposal-resource-@r.Code" />
+                                    <FieldErrors Id="@ErrorId(key)" Messages="@(Errors(key))" />
+                                </div>
+                            }
+                        </div>
+                    </fieldset>
+                    <div class="field">
+                        <label for="p-needs">Attendant needs</label>
+                        <textarea id="p-needs" @bind="_p.AttendantNeeds" maxlength="500" aria-invalid="@Invalid("attendantNeeds")" aria-describedby="@Describe("attendantNeeds", "p-needs-hint")" data-testid="proposal-needs"></textarea>
+                        <span class="field__hint" id="p-needs-hint">Required before the case can be submitted for approval (T7). Up to 500 characters.</span>
+                        <FieldErrors Id="@ErrorId("attendantNeeds")" Messages="@(Errors("attendantNeeds"))" />
+                    </div>
+                }
+
+                <div class="check" role="status" aria-live="polite" data-testid="check-result">
+                    @if (_checking)
+                    {
+                        <p class="muted">Checking the slot…</p>
+                    }
+                    else if (_checkError is not null)
+                    {
+                        <p class="check__bad"><strong>Check unavailable:</strong> @_checkError</p>
+                    }
+                    else if (_check is null)
+                    {
+                        <p class="muted">Enter a date, start, duration and attendee count to check the slot.</p>
+                    }
+                    else if (_check.Conflicts.Count == 0)
+                    {
+                        <p class="check__ok" data-testid="check-free"><strong>No conflicts.</strong> @Ui.Local(_check.StartUtc, _check.TimeZoneId, "ddd d MMM, HH:mm")–@Ui.LocalTime(_check.EndUtc, _check.TimeZoneId)
+                            is free; the venue is blocked @Ui.LocalTime(_check.BlockStartUtc, _check.TimeZoneId)–@Ui.LocalTime(_check.BlockEndUtc, _check.TimeZoneId) with buffers.</p>
+                    }
+                    else
+                    {
+                        <p class="check__bad"><strong>@Ui.Plural(_check.Conflicts.Count, "problem", "problems") with this slot:</strong></p>
+                        <ul class="check__list">
+                            @foreach (var c in _check.Conflicts)
+                            {
+                                <li data-testid="check-conflict" data-kind="@c.Kind"><span class="tag">@KindLabel(c.Kind)</span> @c.Message</li>
+                            }
+                        </ul>
+                    }
+                </div>
+                @if (_check is { Suggestions.Count: > 0 } && _check.Conflicts.Count > 0)
+                {
+                    <div>
+                        <p class="field__hint" id="suggest-hint">Next free starts on this day:</p>
+                        <div class="row" role="group" aria-describedby="suggest-hint">
+                            @foreach (var s in _check.Suggestions)
+                            {
+                                <button type="button" class="btn btn--small" @onclick="() => UseSuggestion(s)" data-testid="suggestion">Use @Ui.LocalTime(s, _check.TimeZoneId)</button>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @if (_conflictRows is not null)
+                {
+                    <ConflictPanel Rows="_conflictRows" OnReload="ReloadAfterConflict" OnReapply="ReapplyAsync" />
+                }
+
+                @if (CanReserve)
+                {
+                    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="reserve">@(SelectedCase?.Reservation is null ? "Reserve tentatively (T6)" : "Move the reservation here")</button>
+                }
+                else
+                {
+                    <p class="muted" data-testid="read-only">Your role can check slots but not reserve them; a Scheduling Officer makes reservations.</p>
+                }
+            </form>
+        </section>
+    </div>
+}
+
+<section class="card card--flush" aria-labelledby="desk-title" data-testid="desk">
+    <div class="card__pad">
+        <h2 id="desk-title">Scheduling desk</h2>
+        <p class="muted">Eligible cases waiting for a slot, tentative reservations ready for approval (T7) and cases pending approval.</p>
+    </div>
+    @if (_desk.Count == 0)
+    {
+        <EmptyState Title="No cases on the scheduling desk"><p>Cases appear here after an Eligibility Reviewer passes them.</p></EmptyState>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards">
+                <caption class="visually-hidden">Cases on the scheduling desk</caption>
+                <thead><tr><th scope="col">Case</th><th scope="col">Status</th><th scope="col">Reservation</th><th scope="col">Regional calendar</th><th scope="col">Actions</th></tr></thead>
+                <tbody>
+                    @foreach (var c in _desk)
+                    {
+                        <tr data-testid="desk-row" data-reference="@c.Reference">
+                            <td data-label="Case"><a href="applications/detail?id=@c.Id">@c.Reference</a><br /><span class="muted">@c.Title · @c.Applicant</span></td>
+                            <td data-label="Status"><StatusChip Status="c.Status" /></td>
+                            <td data-label="Reservation">
+                                @if (c.Reservation is { } r)
+                                {
+                                    <span>@r.VenueName, @Ui.Local(r.StartUtc, r.TimeZoneId, "ddd d MMM, HH:mm")–@Ui.LocalTime(r.EndUtc, r.TimeZoneId)</span><br />
+                                    <span class="muted">@Ui.Plural(r.AttendeeCount, "attendee", "attendees") · @Ui.Plural(r.Allocations.Count, "resource line", "resource lines") ·
+                                        @(string.IsNullOrWhiteSpace(r.AttendantNeeds) ? "attendant needs missing" : "attendant needs given")</span>
+                                }
+                                else
+                                {
+                                    <span class="muted">No reservation yet</span>
+                                }
+                            </td>
+                            <td data-label="Regional calendar">
+                                @if (c.Reservation is { } rr)
+                                {
+                                    <span class="chip @CalendarStateClass(rr.CalendarState)">@CalendarStateText(rr.CalendarState)</span>
+                                    @if (rr.OpenReconciliation) { <br /><a href="integrations/calendar">Reconcile on Regional Calendar Sync</a> }
+                                }
+                                else
+                                {
+                                    <span class="muted">—</span>
+                                }
+                            </td>
+                            <td data-label="Actions">
+                                <div class="row">
+                                    @if (CanReserve)
+                                    {
+                                        <button type="button" class="btn btn--small" @onclick="() => LoadCase(c)" data-testid="desk-load">Load into proposal</button>
+                                        @if (c.Status == CaseStatus.TentativelyReserved)
+                                        {
+                                            <button type="button" class="btn btn--small btn--primary" disabled="@Busy" @onclick="() => SubmitForApprovalAsync(c)" data-testid="submit-approval">Submit for approval (T7)</button>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">Read only</span>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    private static readonly DayOfWeek[] Week = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "venue")] public Guid? VenueQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "date")] public string? DateQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "start")] public string? StartQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "case")] public Guid? CaseQuery { get; set; }
+
+    private sealed class Proposal
+    {
+        public Guid? CaseId { get; set; }
+        public DateOnly? Date { get; set; }
+        public TimeOnly? Start { get; set; }
+        public int? Duration { get; set; } = 60;
+        public int? Attendees { get; set; }
+        public string? Category { get; set; }
+        public string? AttendantNeeds { get; set; }
+        public Dictionary<Guid, int?> Qty { get; } = [];
+    }
+
+    private IReadOnlyList<VenueRow> _venues = [];
+    private IReadOnlyList<ResourceOption> _resources = [];
+    private IReadOnlyList<CategoryOption> _categories = [];
+    private IReadOnlyList<SchedulingCase> _desk = [];
+    private IReadOnlyList<BlackoutRow> _closures = [];
+    private DayAvailability? _day;
+    private Guid? _cemeteryId;
+    private Guid? _venueId;
+    private DateOnly _date;
+    private Proposal _p = new();
+    private SlotCheckResult? _check;
+    private string? _checkError;
+    private bool _checking;
+    private CancellationTokenSource? _debounce;
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+    private (Guid, string?, string?)? _loadedKey;
+
+    private VenueRow? Venue => _venues.FirstOrDefault(v => v.Id == _venueId);
+    private SchedulingCase? SelectedCase => _desk.FirstOrDefault(c => c.Id == _p.CaseId);
+    private bool CanReserve => Me?.Can(Cap.ManageReservations) == true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var key = (VenueQuery ?? Guid.Empty, DateQuery, CemeteryQuery?.ToString());
+        if (_loadedKey == key && _venues.Count > 0) return;
+        _loadedKey = key;
+        Problem = null;
+        await LoadAsync(async me =>
+        {
+            if (_venues.Count == 0)
+            {
+                _venues = await Admin.VenuesAsync(me);
+                var lookups = await Cases.LookupsAsync(me);
+                _resources = lookups.Resources;
+                _categories = lookups.Categories;
+            }
+            _venueId = VenueQuery is { } v && _venues.Any(x => x.Id == v) ? v : null;
+            _cemeteryId = CemeteryQuery ?? Venue?.CemeteryId;
+            var today = LocalDate(Clock.GetUtcNow(), Venue?.TimeZoneId);
+            _date = ParseDate(DateQuery) ?? today;
+            _p.Date ??= _date;
+            if (ParseTime(StartQuery) is { } start) _p.Start = start;
+            _p.Start ??= new TimeOnly(10, 0);
+            _desk = await Scheduling.DeskAsync(me);
+            if (CaseQuery is { } caseId && _p.CaseId is null && _desk.FirstOrDefault(c => c.Id == caseId) is { } preset) Prefill(preset);
+            await LoadDayAsync(me);
+        });
+        await CheckNowAsync();
+    }
+
+    private async Task LoadDayAsync(Actor me)
+    {
+        if (Venue is null)
+        {
+            _day = null;
+            _closures = [];
+            return;
+        }
+        _day = await Scheduling.DayAsync(me, Venue.Id, _date);
+        var now = Clock.GetUtcNow();
+        _closures = (await Admin.BlackoutsAsync(me, Venue.Id)).Where(b => b.IsActive && b.EndUtc > now).Take(8).ToList();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loadedKey = null;
+        _venues = [];
+        await OnParametersSetAsync();
+    }
+
+    private void Navigate(Guid? cemetery, Guid? venue, DateOnly date, string? start = null) =>
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["cemetery"] = cemetery?.ToString(),
+            ["venue"] = venue?.ToString(),
+            ["date"] = Date(date),
+            ["start"] = start,
+            ["case"] = null,
+        }), replace: true);
+
+    private void CemeteryChanged(ChangeEventArgs e)
+    {
+        var id = Guid.TryParse(e.Value?.ToString(), out var g) ? g : (Guid?)null;
+        Navigate(id, Venue?.CemeteryId == id ? _venueId : null, _date);
+    }
+
+    private void VenueChanged(ChangeEventArgs e)
+    {
+        var id = Guid.TryParse(e.Value?.ToString(), out var g) ? g : (Guid?)null;
+        _check = null;
+        Navigate(_venues.FirstOrDefault(v => v.Id == id)?.CemeteryId ?? _cemeteryId, id, _date);
+    }
+
+    private void DateChanged(ChangeEventArgs e)
+    {
+        if (ParseDate(e.Value?.ToString()) is not { } d) return;
+        _p.Date = d;
+        Navigate(_cemeteryId, _venueId, d);
+    }
+
+    private void ShiftDay(int days)
+    {
+        _p.Date = _date.AddDays(days);
+        Navigate(_cemeteryId, _venueId, _date.AddDays(days));
+    }
+
+    private void ApplyFilters() => Navigate(_cemeteryId, _venueId, _date);
+
+    private void CaseChanged(ChangeEventArgs e)
+    {
+        var c = Guid.TryParse(e.Value?.ToString(), out var id) ? _desk.FirstOrDefault(x => x.Id == id) : null;
+        if (c is null) _p.CaseId = null;
+        else Prefill(c, keepSlot: true);
+        _conflictRows = null;
+        QueueCheck();
+    }
+
+    private void Prefill(SchedulingCase c, bool keepSlot = false)
+    {
+        _p.CaseId = c.Id;
+        _p.Category = c.CategoryCode;
+        _p.Qty.Clear();
+        if (c.Reservation is { } r)
+        {
+            _p.Duration = (int)(r.EndUtc - r.StartUtc).TotalMinutes;
+            _p.Attendees = r.AttendeeCount;
+            _p.AttendantNeeds = r.AttendantNeeds;
+            foreach (var a in r.Allocations) _p.Qty[a.ResourceId] = a.Quantity;
+        }
+        else
+        {
+            _p.Duration = c.DurationMinutes ?? _p.Duration;
+            _p.Attendees = c.AttendeeCount ?? _p.Attendees;
+        }
+        if (keepSlot) return;
+        var start = c.Reservation?.StartUtc ?? c.PreferredStartUtc;
+        var zone = c.Reservation?.TimeZoneId ?? _venues.FirstOrDefault(v => v.Id == c.PreferredVenueId)?.TimeZoneId;
+        if (start is { } s && zone is not null)
+        {
+            var local = TimeZoneInfo.ConvertTime(s, Ui.Zone(zone));
+            _p.Date = DateOnly.FromDateTime(local.DateTime);
+            _p.Start = TimeOnly.FromDateTime(local.DateTime);
+        }
+    }
+
+    private void LoadCase(SchedulingCase c)
+    {
+        Prefill(c);
+        _conflictRows = null;
+        var venue = c.Reservation?.VenueId ?? c.PreferredVenueId ?? _venueId;
+        var cemetery = _venues.FirstOrDefault(v => v.Id == venue)?.CemeteryId;
+        Announcement = $"{c.Reference} loaded into the proposal.";
+        if (venue != _venueId || _p.Date != _date) Navigate(cemetery, venue, _p.Date ?? _date, _p.Start?.ToString("HH:mm", Ui.Culture));
+        else QueueCheck();
+    }
+
+    private void QtyChanged(Guid resourceId, string? value)
+    {
+        _p.Qty[resourceId] = int.TryParse(value, System.Globalization.NumberStyles.Integer, Ui.Culture, out var n) ? n : null;
+        QueueCheck();
+    }
+
+    private void UseSuggestion(DateTimeOffset utc)
+    {
+        if (_check is null) return;
+        var local = TimeZoneInfo.ConvertTime(utc, Ui.Zone(_check.TimeZoneId));
+        _p.Date = DateOnly.FromDateTime(local.DateTime);
+        _p.Start = TimeOnly.FromDateTime(local.DateTime);
+        Announcement = $"Start moved to {_p.Start:HH\\:mm}.";
+        QueueCheck();
+    }
+
+    /// <summary>Debounced live collision check (E6-03 AC2): one server call 350 ms after the last change.</summary>
+    private void QueueCheck()
+    {
+        _debounce?.Cancel();
+        _debounce?.Dispose();
+        _debounce = new CancellationTokenSource();
+        var token = _debounce.Token;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(350, token);
+                await InvokeAsync(async () =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    await CheckNowAsync();
+                    StateHasChanged();
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                // superseded by a newer change
+            }
+        }, token);
+    }
+
+    private async Task CheckNowAsync()
+    {
+        _checkError = null;
+        if (Venue is null || _p.Date is null || _p.Start is null || _p.Duration is not > 0 || _p.Attendees is null)
+        {
+            _check = null;
+            return;
+        }
+        _checking = true;
+        try
+        {
+            var me = await GetActorAsync();
+            _check = await Scheduling.CheckAsync(me, new SlotCheckInput(Venue.Id, _p.Date.Value, _p.Start.Value, _p.Duration.Value, _p.Attendees.Value,
+                string.IsNullOrEmpty(_p.Category) ? null : _p.Category, Resources(), _p.CaseId));
+        }
+        catch (AppException ex)
+        {
+            _check = null;
+            _checkError = ex.Message;
+        }
+        finally
+        {
+            _checking = false;
+        }
+    }
+
+    private List<ResourceRequestInput> Resources() =>
+        _p.Qty.Where(q => q.Value is not null && _resources.Any(r => r.Id == q.Key && r.CemeteryId == Venue?.CemeteryId))
+            .Select(q => new ResourceRequestInput(q.Key, q.Value!.Value)).ToList();
+
+    private Dictionary<string, string[]> ClientErrors()
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (_p.CaseId is null) errors["caseId"] = ["Choose the case to reserve."];
+        if (_p.Date is null) errors["localDate"] = ["Enter the event date."];
+        if (_p.Start is null) errors["localStart"] = ["Enter the start time."];
+        if (_p.Duration is not > 0) errors["durationMinutes"] = ["Enter a duration in minutes."];
+        if (_p.Attendees is not >= 1) errors["attendeeCount"] = ["At least one attendee is required."];
+        if ((_p.AttendantNeeds?.Trim().Length ?? 0) > 500) errors["attendantNeeds"] = ["Attendant needs must be at most 500 characters."];
+        foreach (var (id, qty) in _p.Qty.Where(q => q.Value < 0)) errors[$"resource-{id}"] = ["Quantity cannot be negative."];
+        return errors;
+    }
+
+    private async Task ReserveAsync()
+    {
+        _conflictRows = null;
+        if (Venue is null || !CanReserve) return;
+        var errors = ClientErrors();
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        var c = SelectedCase!;
+        await SendReservationAsync(c, c.Version);
+    }
+
+    private async Task SendReservationAsync(SchedulingCase c, uint version)
+    {
+        var venueName = Venue!.Name;
+        var ok = await RunAsync(async me =>
+        {
+            var result = await Scheduling.ReserveAsync(me, c.Id, version, new ReserveInput(Venue.Id, _p.Date!.Value, _p.Start!.Value, _p.Duration!.Value, _p.Attendees!.Value,
+                Resources(), _p.AttendantNeeds));
+            Announcement = null;
+        }, c.Reservation is null
+            ? $"{c.Reference} is tentatively reserved at {venueName} on {_p.Date:ddd d MMM} {_p.Start:HH\\:mm}. The hold is queued for the regional calendar."
+            : $"{c.Reference} reservation moved to {venueName} on {_p.Date:ddd d MMM} {_p.Start:HH\\:mm}.");
+        if (!ok && Problem?.StatusCode == 409) await ShowConflictAsync(c);
+        if (ok) await RefreshAfterWriteAsync();
+    }
+
+    private async Task ShowConflictAsync(SchedulingCase mine)
+    {
+        var me = await GetActorAsync();
+        _desk = await Scheduling.DeskAsync(me);
+        var saved = _desk.FirstOrDefault(c => c.Id == mine.Id);
+        _conflictRows =
+        [
+            new("Case status", saved is null ? "No longer on the desk" : Workflow.Display(saved.Status), Workflow.Display(mine.Status)),
+            new("Reservation", Summary(saved?.Reservation), $"{Venue?.Name}, {_p.Date:ddd d MMM} {_p.Start:HH\\:mm}"),
+            new("Attendees", saved?.Reservation?.AttendeeCount.ToString(Ui.Culture) ?? saved?.AttendeeCount?.ToString(Ui.Culture), _p.Attendees?.ToString(Ui.Culture)),
+        ];
+    }
+
+    private static string? Summary(ReservationSummary? r) => r is null ? null : $"{r.VenueName}, {Ui.Local(r.StartUtc, r.TimeZoneId, "ddd d MMM HH:mm")}";
+
+    private async Task ReloadAfterConflict()
+    {
+        _conflictRows = null;
+        Problem = null;
+        var me = await GetActorAsync();
+        _desk = await Scheduling.DeskAsync(me);
+        if (SelectedCase is { } c) Prefill(c);
+        else _p.CaseId = null;
+        await LoadDayAsync(me);
+        await CheckNowAsync();
+        Announcement = "Reloaded the saved version.";
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflictRows = null;
+        if (SelectedCase is not { } latest)
+        {
+            Fail(new Dictionary<string, string[]> { ["caseId"] = ["The case is no longer on the scheduling desk."] });
+            return;
+        }
+        await SendReservationAsync(latest, latest.Version);
+    }
+
+    private async Task SubmitForApprovalAsync(SchedulingCase c)
+    {
+        _conflictRows = null;
+        var ok = await RunAsync(me => Scheduling.SubmitForApprovalAsync(me, c.Id, c.Version), $"{c.Reference} submitted for approval (T7).");
+        if (ok || Problem?.StatusCode == 409) await RefreshAfterWriteAsync();
+    }
+
+    private async Task RefreshAfterWriteAsync()
+    {
+        var me = await GetActorAsync();
+        _desk = await Scheduling.DeskAsync(me);
+        await LoadDayAsync(me);
+        await CheckNowAsync();
+    }
+
+    private string CategoryName(string code) => _categories.FirstOrDefault(c => c.Code == code)?.Name ?? code;
+
+    // ---- timeline geometry (presentation only)
+    private (TimeOnly From, TimeOnly To) Window()
+    {
+        if (_day?.Hours is { } h)
+        {
+            var from = new TimeOnly(Math.Max(0, h.Opens.Hour - 1), 0);
+            var to = h.Closes.Hour >= 23 ? new TimeOnly(23, 59) : new TimeOnly(h.Closes.Hour + 1, 0);
+            return (from, to);
+        }
+        return (new TimeOnly(7, 0), new TimeOnly(20, 0));
+    }
+
+    private IEnumerable<TimeOnly> Ticks()
+    {
+        var (from, to) = Window();
+        var step = (to - from).TotalHours > 10 ? 2 : 1;
+        for (var t = from.Hour; t <= to.Hour; t += step) yield return new TimeOnly(t, 0);
+    }
+
+    private double Pct(TimeOnly t)
+    {
+        var (from, to) = Window();
+        var span = (to - from).TotalMinutes;
+        return Math.Clamp((t - from).TotalMinutes / span * 100, 0, 100);
+    }
+
+    private double Pct(DateTimeOffset utc)
+    {
+        var local = TimeZoneInfo.ConvertTime(utc, Ui.Zone(Venue?.TimeZoneId));
+        var day = DateOnly.FromDateTime(local.DateTime);
+        if (day < _date) return 0;
+        if (day > _date) return 100;
+        return Pct(TimeOnly.FromDateTime(local.DateTime));
+    }
+
+    private static string Css(double left, double right) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"left:{left:0.##}%;width:{Math.Max(0.8, right - left):0.##}%");
+
+    private string Span(TimeOnly from, TimeOnly to) => Css(Pct(from), Pct(to));
+
+    private string Span(DateTimeOffset from, DateTimeOffset to) => Css(Pct(from), Pct(to));
+
+    public void Dispose()
+    {
+        _debounce?.Cancel();
+        _debounce?.Dispose();
+    }
+}

@@ -1,0 +1,54 @@
+@page "/files/expired"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@inherits CasesPage
+@using EventPermits.Application.Services
+@inject FileService Files
+
+<PageTitle>Download link @(Expired ? "expired" : "not valid") · Memorial Event Operations</PageTitle>
+<PageHeader Title="@(Expired ? "This download link has expired" : "This download link is not valid")"
+            Parent="@(Me?.Can(Cap.ViewDocuments) == true ? ("Document Vault", "/documents") : null)" />
+<ProblemAlert Problem="Problem" />
+<InteractiveMarker />
+<LiveRegion Message="@Announcement" />
+
+<section class="card card--narrow" data-testid="link-expired">
+    <p>
+        @if (Expired)
+        {
+            <text>Download links work for a few minutes only and only for the person they were issued to. Generate a fresh link to continue.</text>
+        }
+        else
+        {
+            <text>The link is incomplete, was changed, or was issued to another account. You can generate your own link if you still have access to the file.</text>
+        }
+    </p>
+    @if (_link is not null)
+    {
+        <p><a class="btn btn--primary" href="@_link.Url" data-testid="link-download">Download the file</a></p>
+        <p class="muted">The new link expires at @Ui.Utc(_link.ExpiresAt).</p>
+    }
+    else if (FileId is not null)
+    {
+        <button type="button" class="btn btn--primary" @onclick="RegenerateAsync" disabled="@Busy" data-testid="link-regenerate">Regenerate link</button>
+    }
+    <p class="link-expired__back"><a href="@(Me?.Can(Cap.ViewDocuments) == true ? "documents" : "dashboard")">Back to @(Me?.Can(Cap.ViewDocuments) == true ? "the Document Vault" : "your dashboard")</a></p>
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "id")] public Guid? FileId { get; set; }
+    [SupplyParameterFromQuery(Name = "reason")] public string? Reason { get; set; }
+
+    private SignedLink? _link;
+    private bool Expired => Reason != "invalid";
+
+    protected override Task OnInitializedAsync() => LoadAsync(_ => Task.CompletedTask);
+
+    private async Task RegenerateAsync()
+    {
+        if (FileId is not { } id) return;
+        SignedLink? link = null;
+        if (await RunAsync(async a => link = await Files.IssueLinkAsync(a, id), "A new download link is ready."))
+            _link = link;
+    }
+}

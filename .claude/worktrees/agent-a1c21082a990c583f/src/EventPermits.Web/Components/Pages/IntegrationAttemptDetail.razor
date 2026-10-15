@@ -1,0 +1,144 @@
+@page "/integrations/attempts/{Id:guid}"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject IntegrationHubService Hub
+
+@if (Problem?.StatusCode == 403)
+{
+    <Forbidden />
+}
+else
+{
+    <PageTitle>Integration attempt · Memorial Event Operations</PageTitle>
+    <PageHeader Title="Integration attempt" Parent="@(("Integration Hub", "/integrations"))"
+                Lead="One recorded HTTP attempt, sanitised before it was stored: keys, tokens and signatures are masked." />
+    <ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+    @if (Loading && _detail is null)
+    {
+        <p class="muted" role="status">Loading the attempt…</p>
+    }
+    else if (_detail is not null)
+    {
+        var a = _detail.Attempt;
+        <div class="att-layout">
+            <section class="card" aria-labelledby="att-facts-title" data-testid="attempt-detail">
+                <div class="att-head">
+                    <h2 id="att-facts-title">@a.Integration · @a.Operation</h2>
+                    <span class="chip @(a.Outcome == AttemptOutcome.Success ? "chip--good" : a.Outcome == AttemptOutcome.ClientError ? "chip--attention" : "chip--bad")" data-testid="attempt-outcome">@a.Outcome</span>
+                </div>
+                <dl class="dl att-dl">
+                    <dt>Time</dt><dd>@Ui.Utc(a.At)</dd>
+                    <dt>Request ID</dt><dd class="mono att-wrap" data-testid="attempt-request-id">@a.RequestId</dd>
+                    <dt>Correlation ID</dt><dd class="mono att-wrap">@(string.IsNullOrEmpty(a.CorrelationId) ? "None" : a.CorrelationId)</dd>
+                    <dt>HTTP status</dt><dd data-testid="attempt-status">@(a.StatusCode?.ToString(Ui.Culture) ?? "No response (" + a.Outcome + ")")</dd>
+                    <dt>Duration</dt><dd>@a.DurationMs.ToString("N0", Ui.Culture) ms</dd>
+                    <dt>Attempt number</dt><dd data-testid="attempt-number">@a.AttemptNumber@(a.AttemptNumber > 1 ? " (retry)" : " (first try)")</dd>
+                    <dt>Request</dt><dd class="mono att-wrap">@a.Method @a.Url</dd>
+                    <dt>Linked case</dt>
+                    <dd data-testid="attempt-case">
+                        @if (a.ApplicationId is { } appId)
+                        {
+                            <a href="@($"/applications/{appId}")">@(_detail.ApplicationReference ?? "Open case")</a>
+                        }
+                        else
+                        {
+                            <span class="muted">Not linked to a case</span>
+                        }
+                    </dd>
+                    @if (!string.IsNullOrEmpty(a.Error))
+                    {
+                        <dt>Error</dt><dd class="att-wrap">@a.Error</dd>
+                    }
+                </dl>
+            </section>
+
+            <section class="card" aria-labelledby="att-req-title">
+                <h2 id="att-req-title">Sanitised request summary</h2>
+                <pre class="att-pre" tabindex="0" aria-label="Request summary" data-testid="attempt-request">@(string.IsNullOrWhiteSpace(a.RequestSummary) ? "Not recorded" : a.RequestSummary)</pre>
+                <h2>Response excerpt</h2>
+                <pre class="att-pre" tabindex="0" aria-label="Response excerpt" data-testid="attempt-response">@(string.IsNullOrWhiteSpace(a.ResponseExcerpt) ? "No response body was received." : a.ResponseExcerpt)</pre>
+            </section>
+        </div>
+
+        <section class="card card--flush att-section" aria-labelledby="att-corr-title" data-testid="attempt-correlated">
+            <h2 id="att-corr-title" class="att-section__title">Attempts with the same correlation ID</h2>
+            @if (_detail.SameCorrelation.Count <= 1)
+            {
+                <div class="att-pad"><EmptyState Title="No other attempts share this correlation ID" /></div>
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact">
+                        <caption class="visually-hidden">Attempts in the same operation, oldest first</caption>
+                        <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Integration</th><th scope="col">Operation</th><th scope="col">Result</th><th scope="col" class="num">Attempt</th><th scope="col">Request ID</th></tr></thead>
+                        <tbody>
+                            @foreach (var s in _detail.SameCorrelation)
+                            {
+                                <tr>
+                                    <td data-label="Time (UTC)">@Ui.Utc(s.At)</td>
+                                    <td data-label="Integration">@s.Integration</td>
+                                    <td data-label="Operation">@s.Operation</td>
+                                    <td data-label="Result">@s.Outcome@(s.StatusCode is { } sc ? $" · {sc}" : "")</td>
+                                    <td data-label="Attempt" class="num">@s.AttemptNumber</td>
+                                    <td data-label="Request ID">
+                                        @if (s.Id == a.Id)
+                                        {
+                                            <span class="mono">@s.RequestId</span> <span class="tag">this attempt</span>
+                                        }
+                                        else
+                                        {
+                                            <a class="mono" href="@($"/integrations/attempts/{s.Id}")">@s.RequestId</a>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="card card--flush att-section" aria-labelledby="att-audit-title" data-testid="attempt-audit">
+            <h2 id="att-audit-title" class="att-section__title">Audit events in the same operation</h2>
+            @if (_detail.RelatedAudit.Count == 0)
+            {
+                <div class="att-pad"><EmptyState Title="No audit events share this correlation ID" /></div>
+            }
+            else
+            {
+                <ul class="timeline att-timeline">
+                    @foreach (var e in _detail.RelatedAudit)
+                    {
+                        <li>
+                            <strong>@e.Action</strong> — @e.Summary
+                            <div class="timeline__meta">@Ui.Utc(e.At) · @e.ActorName</div>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+    }
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private AttemptDetail? _detail;
+
+    protected override Task OnParametersSetAsync()
+    {
+        _detail = null;
+        Problem = null;
+        return LoadAsync(async actor => _detail = await Hub.AttemptAsync(actor, Id));
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await RunAsync(async actor => _detail = await Hub.AttemptAsync(actor, Id));
+    }
+}

@@ -1,0 +1,106 @@
+@using EventPermits.Application.Services
+@* Incident fields shared by "Log an incident" and "Follow-up" (E8-03 AC1, AC2). Rendered inside a .form-grid. *@
+<div class="field">
+    <label for="@($"{Prefix}-category")">Category</label>
+    <input id="@($"{Prefix}-category")" type="text" list="@($"{Prefix}-categories")" @bind="Model.Category" maxlength="80" required
+           aria-invalid="@Inv("category")" aria-describedby="@Desc("category", "category-hint")" data-testid="@($"{Prefix}-category")" />
+    <datalist id="@($"{Prefix}-categories")">
+        @foreach (var c in Categories)
+        {
+            <option value="@c"></option>
+        }
+    </datalist>
+    <span class="field__hint" id="@($"{Prefix}-category-hint")">3–80 characters, for example “Trip hazard”.</span>
+    <FieldError Errors="@Problem?.For("category")" Id="@($"{Prefix}-category-error")" />
+</div>
+<div class="field">
+    <label for="@($"{Prefix}-severity")">Severity</label>
+    <select id="@($"{Prefix}-severity")" @bind="Model.Severity" aria-describedby="@($"{Prefix}-severity-hint")" data-testid="@($"{Prefix}-severity")">
+        @foreach (var s in Enum.GetValues<IncidentSeverity>())
+        {
+            <option value="@s">@s</option>
+        }
+    </select>
+    <span class="field__hint" id="@($"{Prefix}-severity-hint")">High and Critical incidents block closing the case until resolved.</span>
+</div>
+<div class="field span-2">
+    <label for="@($"{Prefix}-description")">Description</label>
+    <textarea id="@($"{Prefix}-description")" @bind="Model.Description" maxlength="2000" required
+              aria-invalid="@Inv("description")" aria-describedby="@Desc("description", "description-hint")" data-testid="@($"{Prefix}-description")"></textarea>
+    <span class="field__hint" id="@($"{Prefix}-description-hint")">What happened, where and who was involved (10–2,000 characters).</span>
+    <FieldError Errors="@Problem?.For("description")" Id="@($"{Prefix}-description-error")" />
+</div>
+<div class="field">
+    <label for="@($"{Prefix}-owner")">Follow-up owner</label>
+    <select id="@($"{Prefix}-owner")" @bind="Model.OwnerUserId" aria-invalid="@Inv("ownerUserId")" aria-describedby="@Desc("ownerUserId", null)" data-testid="@($"{Prefix}-owner")">
+        <option value="">No owner yet</option>
+        @foreach (var o in Owners)
+        {
+            <option value="@o.UserId">@o.DisplayName</option>
+        }
+    </select>
+    <FieldError Errors="@Problem?.For("ownerUserId")" Id="@($"{Prefix}-ownerUserId-error")" />
+</div>
+<div class="field">
+    <label for="@($"{Prefix}-due")">Follow-up due date</label>
+    <input id="@($"{Prefix}-due")" type="date" @bind="Model.DueDate" data-testid="@($"{Prefix}-due")" />
+</div>
+<div class="field span-2">
+    <label for="@($"{Prefix}-corrective")">Corrective action <span class="muted">(optional)</span></label>
+    <textarea id="@($"{Prefix}-corrective")" @bind="Model.CorrectiveAction" maxlength="2000"
+              aria-invalid="@Inv("correctiveAction")" aria-describedby="@Desc("correctiveAction", null)" data-testid="@($"{Prefix}-corrective")"></textarea>
+    <FieldError Errors="@Problem?.For("correctiveAction")" Id="@($"{Prefix}-correctiveAction-error")" />
+</div>
+
+@code {
+    private static readonly string[] Categories = ["Trip hazard", "Medical assistance", "Lost property", "Noise complaint", "Property damage", "Security", "Weather", "Accessibility"];
+
+    [Parameter, EditorRequired] public Input Model { get; set; } = new();
+    [Parameter, EditorRequired] public string Prefix { get; set; } = "";
+    [Parameter] public IReadOnlyList<StaffOption> Owners { get; set; } = [];
+    [Parameter] public UiProblem? Problem { get; set; }
+
+    private string? Inv(string field) => Problem?.For(field).Length > 0 ? "true" : null;
+
+    private string? Desc(string field, string? hint)
+    {
+        var parts = new List<string>();
+        if (hint is not null) parts.Add($"{Prefix}-{hint}");
+        if (Inv(field) is not null) parts.Add($"{Prefix}-{field}-error");
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    /// <summary>Form model; the server re-validates everything (IncidentService.Validate).</summary>
+    public sealed class Input
+    {
+        public string Category { get; set; } = "";
+        public string Severity { get; set; } = nameof(IncidentSeverity.Low);
+        public string Description { get; set; } = "";
+        public string OwnerUserId { get; set; } = "";
+        public DateOnly? DueDate { get; set; }
+        public string CorrectiveAction { get; set; } = "";
+
+        public static Input From(Incident i) => new()
+        {
+            Category = i.Category, Severity = i.Severity.ToString(), Description = i.Description, OwnerUserId = i.OwnerUserId ?? "",
+            DueDate = i.DueDate, CorrectiveAction = i.CorrectiveAction,
+        };
+
+        public Input Clone() => (Input)MemberwiseClone();
+
+        public IncidentInput ToInput() => new(Category, Enum.Parse<IncidentSeverity>(Severity), Description,
+            string.IsNullOrEmpty(OwnerUserId) ? null : OwnerUserId, DueDate, CorrectiveAction);
+
+        /// <summary>Immediate checks before the round trip; same limits as the server.</summary>
+        public Dictionary<string, string[]> ClientErrors()
+        {
+            var errors = new Dictionary<string, string[]>();
+            var category = Category.Trim();
+            if (category.Length < 3 || category.Length > 80) errors["category"] = ["Category must be 3–80 characters."];
+            var description = Description.Trim();
+            if (description.Length < 10 || description.Length > 2000) errors["description"] = ["Description must be 10–2,000 characters."];
+            if (CorrectiveAction.Length > 2000) errors["correctiveAction"] = ["Corrective action must be 2,000 characters or fewer."];
+            return errors;
+        }
+    }
+}

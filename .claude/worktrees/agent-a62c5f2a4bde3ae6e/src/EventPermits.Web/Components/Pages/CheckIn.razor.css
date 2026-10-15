@@ -1,0 +1,23 @@
+/* Used on phones at the cemetery gate: large type, full-width 56 px controls. */
+.checkin-code { font-size: 1.35rem !important; letter-spacing: .08em; min-height: 56px !important; font-family: var(--font-mono); text-transform: uppercase; }
+.btn--big { min-height: 56px; font-size: 1.05rem; padding: 0 var(--space-5); }
+.verdict { border-left-width: 6px; }
+.verdict--ok { border-left-color: var(--ok); background: var(--ok-tint); }
+.verdict--warn { border-left-color: var(--warn); background: var(--warn-tint); }
+.verdict--bad { border-left-color: var(--danger); background: var(--danger-tint); }
+.verdict__head { display: flex; gap: var(--space-4); align-items: flex-start; margin-bottom: var(--space-3); }
+.verdict__head h2 { margin: 0 0 var(--space-1); }
+.verdict__icon { flex: none; display: inline-grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; color: #fff; font-size: 1.5rem; font-weight: 700; }
+.verdict--ok .verdict__icon { background: var(--ok); }
+.verdict--warn .verdict__icon { background: var(--warn); }
+.verdict--bad .verdict__icon { background: var(--danger); }
+.verdict__reason { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.today-title { margin: 0; padding: var(--space-4) var(--space-5) var(--space-2); }
+.today { list-style: none; margin: 0; padding: 0; }
+.today li { display: grid; grid-template-columns: 7.5em 1fr auto; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-5); border-top: 1px solid var(--line); }
+.today__time { font-variant-numeric: tabular-nums; font-weight: 600; }
+.today__what { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .btn--big { width: 100%; }
+  .today li { grid-template-columns: 1fr; gap: var(--space-1); padding: var(--space-3) var(--space-4); }
+}

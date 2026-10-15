@@ -1,0 +1,373 @@
+@page "/integrations/weather"
+@attribute [Authorize(Policy = Cap.ViewWeather)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject WeatherQueryService Weather
+@inject ApprovalService Approvals
+@inject AdminService Admin
+
+<PageTitle>Weather & Advisories · Memorial Event Operations</PageTitle>
+<PageHeader Title="Weather & Advisories" Lead="@($"Forecasts per venue and date from the weather service, cached for {_cacheMinutes} minutes. When the service is down the last cached forecast is shown labelled Stale; nothing is invented.")" />
+<ProblemAlert Problem="Problem" OnRetry="RetryAsync" />
+<LiveRegion Message="@Announcement" />
+
+<form class="filters" @onsubmit="() => LookupAsync(false)" @onsubmit:preventDefault novalidate data-testid="weather-form">
+    <div class="field">
+        <label for="wx-venue">Venue</label>
+        <select id="wx-venue" @bind="_venue" aria-invalid="@Bad("venue")" aria-describedby="wx-venue-error" data-testid="weather-venue">
+            <option value="">Choose a venue</option>
+            @foreach (var group in _venues.GroupBy(v => v.CemeteryName))
+            {
+                <optgroup label="@group.Key">
+                    @foreach (var v in group)
+                    {
+                        <option value="@v.Id">@v.Name (@v.Code)</option>
+                    }
+                </optgroup>
+            }
+        </select>
+        <span id="wx-venue-error" class="field__error" data-testid="weather-venue-error">@Msg("venue")</span>
+    </div>
+    <div class="field">
+        <label for="wx-date">Date (venue-local)</label>
+        <input id="wx-date" type="date" @bind="_date" aria-invalid="@Bad("date")" aria-describedby="wx-date-error" data-testid="weather-date" />
+        <span id="wx-date-error" class="field__error">@Msg("date")</span>
+    </div>
+    <div class="field wx-buttons">
+        <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="weather-show">Show forecast</button>
+        <button type="button" class="btn" disabled="@Busy" @onclick="() => LookupAsync(true)" data-testid="weather-refresh">Refresh from service</button>
+    </div>
+</form>
+
+@if (_view is not null)
+{
+    var snap = _view.Snapshot;
+    <section class="card wx-forecast" aria-labelledby="wx-title" data-testid="weather-forecast">
+        <div class="wx-forecast__head">
+            <h2 id="wx-title">@_view.VenueName · @_view.Date.ToString("dddd d MMMM yyyy", Ui.Culture)</h2>
+            @if (snap is not null)
+            {
+                <span class="chip @(_view.Fresh ? "chip--good" : "chip--attention")" data-testid="weather-freshness">@(_view.Fresh ? "Fresh" : "Stale")</span>
+            }
+        </div>
+        @if (_view.Problem is not null)
+        {
+            <div class="alert alert--warning" data-testid="weather-problem">
+                <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span><strong>@(snap is null ? "Forecast unavailable" : "Showing the last cached forecast")</strong></p>
+                <p>@_view.Problem</p>
+            </div>
+        }
+        @if (snap is null)
+        {
+            <EmptyState Title="No forecast for this venue and date">
+                <p>The weather service did not answer and nothing is cached. Try "Refresh from service" later.</p>
+            </EmptyState>
+        }
+        else
+        {
+            @if (snap.Advisory == WeatherAdvisory.Severe)
+            {
+                <div class="wx-severe" role="note" data-testid="weather-severe">
+                    <strong>⚠ Severe weather advisory</strong>
+                    <span>A manager must acknowledge it on each affected case before a permit can be issued. Cases are never cancelled automatically.</span>
+                </div>
+            }
+            else if (snap.Advisory == WeatherAdvisory.Advisory)
+            {
+                <div class="wx-advisory" role="note" data-testid="weather-advisory"><strong>Weather advisory</strong> — check conditions before the event.</div>
+            }
+            <dl class="wx-figures">
+                <div><dt>Conditions</dt><dd data-testid="weather-summary">@snap.Summary</dd></div>
+                <div><dt>Temperature</dt><dd>@snap.TemperatureC.ToString("0.#", Ui.Culture) °C</dd></div>
+                <div><dt>Wind</dt><dd>@snap.WindKph.ToString("0.#", Ui.Culture) km/h</dd></div>
+                <div><dt>Precipitation</dt><dd>@snap.PrecipitationPct %</dd></div>
+                <div><dt>Advisory level</dt><dd>@snap.Advisory</dd></div>
+            </dl>
+            <p class="muted wx-times" data-testid="weather-times">Source timestamp @Ui.Utc(snap.SourceTimestampUtc) · retrieved @Ui.Utc(snap.RetrievedAt)@(_view.Stale ? $" · older than {_cacheMinutes} minutes" : "")</p>
+        }
+
+        <h3>Events at this venue on this date</h3>
+        @if (_view.Cases.Count == 0)
+        {
+            <p class="muted" data-testid="weather-no-cases">No reservations at this venue on this date.</p>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards table--compact" data-testid="weather-cases">
+                    <caption class="visually-hidden">Cases with a reservation at this venue on this date</caption>
+                    <thead><tr><th scope="col">Case</th><th scope="col">Start</th><th scope="col">Status</th><th scope="col">Acknowledgement</th></tr></thead>
+                    <tbody>
+                        @foreach (var c in _view.Cases)
+                        {
+                            <tr>
+                                <td data-label="Case"><a href="@($"/applications/{c.Id}")">@c.Reference</a></td>
+                                <td data-label="Start">@Ui.Local(c.StartUtc, _view.TimeZoneId, "HH:mm")</td>
+                                <td data-label="Status"><StatusChip Status="c.Status" /></td>
+                                <td data-label="Acknowledgement" data-testid="@($"weather-ack-{c.Reference}")">
+                                    @if (c.Acknowledged)
+                                    {
+                                        <span class="chip chip--good">Acknowledged</span>
+                                    }
+                                    else if (snap?.Advisory == WeatherAdvisory.Severe)
+                                    {
+                                        <span class="chip chip--bad">Needs acknowledgement</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">Not required</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (Me?.Can(Cap.AcknowledgeWeather) == true && snap?.Advisory == WeatherAdvisory.Severe && _view.Cases.Any(c => !c.Acknowledged && !Workflow.IsTerminal(c.Status)))
+            {
+                @if (_conflict)
+                {
+                    <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="AcknowledgeAsync" />
+                }
+                <form class="form wx-ack" @onsubmit="AcknowledgeAsync" @onsubmit:preventDefault novalidate data-testid="weather-ack-form">
+                    <h3>Acknowledge the severe advisory</h3>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="wx-ack-case">Case</label>
+                            <select id="wx-ack-case" @bind="_ackCase" data-testid="weather-ack-case">
+                                @foreach (var c in _view.Cases.Where(c => !c.Acknowledged && !Workflow.IsTerminal(c.Status)))
+                                {
+                                    <option value="@c.Id">@c.Reference</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="field span-2">
+                            <label for="wx-ack-note">Acknowledgement note</label>
+                            <textarea id="wx-ack-note" @bind="_ackNote" maxlength="@Limits.ReasonMax" aria-invalid="@Invalid("note")"
+                                      aria-describedby="wx-ack-note-hint wx-ack-note-error" data-testid="weather-ack-note"></textarea>
+                            <span id="wx-ack-note-hint" class="field__hint">What you have arranged (e.g. covered seating, a later start). At least @Limits.ReasonMin characters; recorded in the audit log.</span>
+                            <span id="wx-ack-note-error" class="field__error" data-testid="weather-ack-note-error">@string.Join(" ", Problem?.For("note") ?? [])</span>
+                        </div>
+                    </div>
+                    <div><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="weather-ack-submit">Record acknowledgement</button></div>
+                </form>
+            }
+        }
+    </section>
+}
+
+<div class="wx-grid">
+    <section class="card card--flush" aria-labelledby="wx-upcoming-title" data-testid="weather-upcoming">
+        <h2 id="wx-upcoming-title" class="wx-section-title">Upcoming events (next 14 days)</h2>
+        @if (_upcoming.Count == 0)
+        {
+            <div class="wx-pad"><EmptyState Title="No upcoming reserved events in your scope" /></div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards table--compact">
+                    <caption class="visually-hidden">Upcoming events with their cached advisory</caption>
+                    <thead><tr><th scope="col">Date</th><th scope="col">Case</th><th scope="col">Venue</th><th scope="col">Cached advisory</th><th scope="col">Forecast</th></tr></thead>
+                    <tbody>
+                        @foreach (var u in _upcoming)
+                        {
+                            <tr>
+                                <td data-label="Date">@Ui.Local(u.StartUtc, u.TimeZoneId, "ddd d MMM, HH:mm")</td>
+                                <td data-label="Case"><a href="@($"/applications/{u.CaseId}")">@u.Reference</a>@(u.Acknowledged ? " (acknowledged)" : "")</td>
+                                <td data-label="Venue">@u.VenueName</td>
+                                <td data-label="Cached advisory">
+                                    @if (u.Advisory is { } adv)
+                                    {
+                                        <span class="chip @AdvisoryClass(adv)">@adv</span> <span class="muted">@(u.Fresh ? "fresh" : "stale")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">Not fetched</span>
+                                    }
+                                </td>
+                                <td data-label="Forecast"><button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => PickAsync(u.VenueId, u.LocalDate)" data-testid="weather-pick">Check<span class="visually-hidden"> forecast for @u.Reference</span></button></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="card card--flush" aria-labelledby="wx-cache-title" data-testid="weather-cache">
+        <h2 id="wx-cache-title" class="wx-section-title">Forecast cache</h2>
+        @if (_cache.Count == 0)
+        {
+            <div class="wx-pad"><EmptyState Title="Nothing cached yet">
+                <p>Show a forecast above to fetch and cache it.</p>
+            </EmptyState></div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards table--compact">
+                    <caption class="visually-hidden">Newest cached forecast per venue and date</caption>
+                    <thead><tr><th scope="col">Venue</th><th scope="col">Date</th><th scope="col">Advisory</th><th scope="col">Retrieved</th><th scope="col">Freshness</th></tr></thead>
+                    <tbody>
+                        @foreach (var c in _cache)
+                        {
+                            <tr>
+                                <td data-label="Venue">@c.VenueName</td>
+                                <td data-label="Date">@c.Date.ToString("d MMM yyyy", Ui.Culture)</td>
+                                <td data-label="Advisory"><span class="chip @AdvisoryClass(c.Advisory)">@c.Advisory</span></td>
+                                <td data-label="Retrieved">@Ui.Utc(c.RetrievedAt)</td>
+                                <td data-label="Freshness">@(c.Fresh ? "Fresh" : "Stale")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "venueId")] public string? VenueQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "date")] public string? DateQuery { get; set; }
+
+    private IReadOnlyList<VenueRow> _venues = [];
+    private IReadOnlyList<UpcomingWeatherRow> _upcoming = [];
+    private IReadOnlyList<CachedForecastRow> _cache = [];
+    private int _cacheMinutes = 15;
+    private string _venue = "";
+    private DateOnly? _date;
+    private WeatherView? _view;
+    private (Guid, DateOnly)? _loadedKey;
+    private readonly Dictionary<string, string> _fieldErrors = [];
+    private string _ackCase = "";
+    private string _ackNote = "";
+    private bool _conflict;
+    private bool _lastRefresh;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _venue = Guid.TryParse(VenueQuery, out var v) ? v.ToString() : _venue;
+        _date = DateOnly.TryParse(DateQuery, Ui.Culture, out var d) ? d : _date ?? DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        await LoadAsync(async actor =>
+        {
+            _cacheMinutes = await Weather.CacheMinutesAsync();
+            if (_venues.Count == 0) _venues = (await Admin.VenuesAsync(actor)).Where(x => x.IsActive).ToList();
+            if (Guid.TryParse(_venue, out var venueId) && _date is { } date && _loadedKey != (venueId, date))
+                await FetchAsync(actor, venueId, date, refresh: false);
+            await LoadListsAsync(actor);
+        });
+    }
+
+    private async Task LoadListsAsync(Actor actor)
+    {
+        _upcoming = await Weather.UpcomingAsync(actor);
+        _cache = await Weather.CacheAsync(actor);
+    }
+
+    private async Task FetchAsync(Actor actor, Guid venueId, DateOnly date, bool refresh)
+    {
+        _view = await Weather.ForecastAsync(actor, venueId, date, refresh);
+        _loadedKey = (venueId, date);
+        var open = _view.Cases.Where(c => !c.Acknowledged && !Workflow.IsTerminal(c.Status)).ToList();
+        if (!open.Any(c => c.Id.ToString() == _ackCase)) _ackCase = open.FirstOrDefault()?.Id.ToString() ?? "";
+    }
+
+    private async Task LookupAsync(bool refresh)
+    {
+        _fieldErrors.Clear();
+        _conflict = false;
+        _lastRefresh = refresh;
+        if (!Guid.TryParse(_venue, out var venueId)) _fieldErrors["venue"] = "Choose a venue.";
+        if (_date is null) _fieldErrors["date"] = "Choose a date.";
+        if (_fieldErrors.Count > 0)
+        {
+            Problem = null;
+            await Js.InvokeVoidAsync("eventPermits.focusFirstInvalid");
+            return;
+        }
+        var date = _date!.Value;
+        if (await RunAsync(async actor =>
+            {
+                await FetchAsync(actor, venueId, date, refresh);
+                await LoadListsAsync(actor);
+            }))
+        {
+            Announcement = _view?.Snapshot is null ? "No forecast is available for this venue and date."
+                : $"{(_view.Fresh ? "Fresh" : "Stale")} forecast shown: {_view.Snapshot.Summary}, advisory {_view.Snapshot.Advisory}.";
+            Nav.NavigateTo($"/integrations/weather?venueId={venueId}&date={date:yyyy-MM-dd}", replace: true);
+        }
+    }
+
+    private Task PickAsync(Guid venueId, DateOnly date)
+    {
+        _venue = venueId.ToString();
+        _date = date;
+        return LookupAsync(false);
+    }
+
+    private Task RetryAsync() => _view is null ? LookupAsync(_lastRefresh) : LookupAsync(true);
+
+    private async Task AcknowledgeAsync()
+    {
+        if (_view is null || !Guid.TryParse(_ackCase, out var caseId)) return;
+        var target = _view.Cases.FirstOrDefault(c => c.Id == caseId);
+        if (target is null) return;
+        var reference = target.Reference;
+        _conflict = false;
+        var ok = await RunAsync(async actor =>
+        {
+            await Approvals.AcknowledgeWeatherAsync(actor, caseId, target.Version, _ackNote);
+            await FetchAsync(actor, _view.VenueId, _view.Date, refresh: false);
+            await LoadListsAsync(actor);
+        }, $"Severe weather acknowledged on {reference}.");
+        if (ok) _ackNote = "";
+        else if (Problem?.StatusCode == 409)
+        {
+            // Show the saved state next to the unsaved note; nothing is overwritten until the user re-applies.
+            _conflict = true;
+            _conflictCase = (caseId, reference, target.Version);
+            var venueId = _view.VenueId;
+            var date = _view.Date;
+            await LoadAsync(actor => FetchAsync(actor, venueId, date, refresh: false));
+        }
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        if (_view is null) return;
+        _conflict = false;
+        await RunAsync(async actor => await FetchAsync(actor, _view.VenueId, _view.Date, refresh: false), "Reloaded the saved version of the cases.");
+    }
+
+    private (Guid Id, string Reference, uint Version)? _conflictCase;
+
+    private IReadOnlyList<ConflictPanel.Row> ConflictRows
+    {
+        get
+        {
+            if (_view is null || _conflictCase is not { } cc) return [];
+            var saved = _view.Cases.FirstOrDefault(c => c.Id == cc.Id);
+            return
+            [
+                new("Case", cc.Reference, cc.Reference),
+                new("Status", saved is null ? null : Workflow.Display(saved.Status), null),
+                new("Weather acknowledged", saved?.Acknowledged == true ? "Yes" : "No", "Yes"),
+                new("Record version", saved?.Version.ToString(Ui.Culture), cc.Version.ToString(Ui.Culture)),
+                new("Acknowledgement note", null, _ackNote),
+            ];
+        }
+    }
+
+    private string? Bad(string field) => _fieldErrors.ContainsKey(field) ? "true" : null;
+    private string? Msg(string field) => _fieldErrors.TryGetValue(field, out var m) ? m : null;
+
+    private static string AdvisoryClass(WeatherAdvisory a) => a switch
+    {
+        WeatherAdvisory.Severe => "chip--bad",
+        WeatherAdvisory.Advisory => "chip--attention",
+        _ => "chip--good",
+    };
+}

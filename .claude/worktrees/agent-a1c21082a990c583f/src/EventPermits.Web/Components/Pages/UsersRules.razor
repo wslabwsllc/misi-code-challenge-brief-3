@@ -1,0 +1,48 @@
+@page "/admin/users-rules"
+@attribute [Authorize(Policy = Cap.ViewAudit)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Web.Components.Pages.AdminUsersRules
+
+<PageTitle>Users & Rules · Memorial Event Operations</PageTitle>
+<PageHeader Title="Administration: Users & Rules" Lead="@Lead" />
+<ProblemAlert Problem="Problem" />
+
+@if (Me is not null)
+{
+    <nav class="ur-toc" aria-label="On this page">
+        <ul role="list">
+            @if (Me.Can(Cap.ManageUsers))
+            {
+                <li><a href="admin/users-rules#users">Accounts and roles</a></li>
+            }
+            <li><a href="admin/users-rules#rules">Business rules</a></li>
+            @if (Me.Can(Cap.ViewNotifications))
+            {
+                <li><a href="admin/users-rules#templates">Notification templates</a></li>
+            }
+            <li><a href="admin/users-rules#audit">Audit log</a></li>
+        </ul>
+    </nav>
+
+    <div class="ur-sections">
+        @if (Me.Can(Cap.ManageUsers))
+        {
+            <UserAccounts />
+        }
+        <RuleSettings />
+        @if (Me.Can(Cap.ViewNotifications))
+        {
+            <TemplateSettings />
+        }
+        <AuditViewer />
+    </div>
+}
+
+@code {
+    private string Lead => Me?.Can(Cap.ManageUsers) == true
+        ? "Manage staff accounts and roles, business rule thresholds and message templates, and review the append-only audit log. Every change is audited; nothing is deleted."
+        : "Read-only view of business rules and templates, and the append-only audit log with CSV export.";
+
+    protected override Task OnInitializedAsync() => LoadAsync(_ => Task.CompletedTask);
+}

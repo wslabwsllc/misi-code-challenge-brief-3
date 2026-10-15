@@ -1,0 +1,403 @@
+@page "/documents"
+@attribute [Authorize(Policy = Cap.ViewDocuments)]
+@rendermode InteractiveServer
+@inherits CasesPage
+@using EventPermits.Application.Services
+@inject FileService Files
+@inject CaseService Cases
+
+<PageTitle>Document Vault · Memorial Event Operations</PageTitle>
+<PageHeader Title="Document Vault" Lead="Every attachment on the cases you may see. Files stay in private storage; downloads and previews use short-lived links that are checked and audited when used." />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<InteractiveMarker />
+<LiveRegion Message="@Announcement" />
+
+@if (Me is not null && !FileService.CanDownload(Me))
+{
+    <p class="alert alert--info" data-testid="vault-metadata-only">Your role sees file details only. Downloads and previews are not available to you.</p>
+}
+
+<form class="filters" @onsubmit="Apply" novalidate data-testid="vault-filters" aria-label="Filter documents">
+    <div class="field">
+        <label for="v-q">Search</label>
+        <input id="v-q" type="search" @bind="_f.Search" maxlength="100" placeholder="File name, case or uploader" aria-invalid="@Invalid("search")" aria-describedby="@Describe("search")" data-testid="vault-search" />
+        <FieldError For="search" Messages="@Errs("search")" />
+    </div>
+    <div class="field">
+        <label for="v-case">Case reference</label>
+        <input id="v-case" @bind="_f.Case" maxlength="40" placeholder="APP-2026-…" aria-invalid="@Invalid("case")" aria-describedby="@Describe("case")" data-testid="vault-case" />
+        <FieldError For="case" Messages="@Errs("case")" />
+    </div>
+    <div class="field">
+        <label for="v-uploader">Uploaded by</label>
+        <input id="v-uploader" @bind="_f.Uploader" maxlength="120" aria-invalid="@Invalid("uploader")" aria-describedby="@Describe("uploader")" data-testid="vault-uploader" />
+        <FieldError For="uploader" Messages="@Errs("uploader")" />
+    </div>
+    <div class="field">
+        <label for="v-type">Document type</label>
+        <select id="v-type" @bind="_f.Type" data-testid="vault-type">
+            <option value="">Any type</option>
+            @foreach (var t in Enum.GetValues<DocumentType>())
+            {
+                <option value="@t">@CaseService.Label(t)</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="v-purpose">Kind</label>
+        <select id="v-purpose" @bind="_f.Purpose" data-testid="vault-purpose">
+            <option value="">Any kind</option>
+            @foreach (var p in Enum.GetValues<AttachmentPurpose>())
+            {
+                <option value="@p">@PurposeLabel(p)</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="v-from">Uploaded from</label>
+        <input id="v-from" type="date" @bind="_f.From" aria-invalid="@Invalid("from")" aria-describedby="@Describe("from")" data-testid="vault-from" />
+        <FieldError For="from" Messages="@Errs("from")" />
+    </div>
+    <div class="field">
+        <label for="v-to">Uploaded to</label>
+        <input id="v-to" type="date" @bind="_f.To" aria-invalid="@Invalid("to")" aria-describedby="@Describe("to")" data-testid="vault-to" />
+        <FieldError For="to" Messages="@Errs("to")" />
+    </div>
+    <div class="row vault__buttons">
+        <button type="submit" class="btn btn--primary" data-testid="vault-apply">Apply filters</button>
+        <a class="btn btn--quiet" href="documents">Clear</a>
+    </div>
+</form>
+
+<div class="vault__layout">
+    <section class="card card--flush" aria-labelledby="vault-results">
+        <h2 id="vault-results" class="visually-hidden">Documents</h2>
+        @if (Loading && _rows is null)
+        {
+            <p class="vault__pad" role="status">Loading documents…</p>
+        }
+        else if (_rows is { Count: 0 })
+        {
+            <EmptyState Title="@(HasFilters ? "No documents match these filters" : "No documents yet")">
+                <p>@(HasFilters ? "Try fewer filters." : "Documents appear here when coordinators attach them to applications.")</p>
+            </EmptyState>
+        }
+        else if (_rows is not null)
+        {
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="vault-table">
+                    <caption>@Ui.Plural(_total, "document", "documents"), newest first.</caption>
+                    <thead>
+                        <tr><th scope="col">File</th><th scope="col">Case</th><th scope="col">Type</th><th scope="col">Size</th><th scope="col">Checksum</th><th scope="col">Uploaded</th><th scope="col">Access</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var a in _rows)
+                        {
+                            <tr data-testid="vault-row" data-file="@a.FileName">
+                                <td data-label="File"><span class="vault__name">@a.FileName</span><br /><span class="muted">@a.ContentType</span></td>
+                                <td data-label="Case">@if (a.ApplicationId is { } appId) { <a href="@($"applications/{appId}")">@a.ApplicationReference</a> }</td>
+                                <td data-label="Type">@(a.Purpose == AttachmentPurpose.ApplicationDocument ? CaseService.Label(a.DocumentType) : PurposeLabel(a.Purpose))</td>
+                                <td data-label="Size">@Size(a.SizeBytes)</td>
+                                <td data-label="Checksum"><code title="SHA-256 @a.Sha256">@a.Sha256[..12]…</code></td>
+                                <td data-label="Uploaded">@Ui.Utc(a.UploadedAt)<br /><span class="muted">by @a.UploadedBy</span></td>
+                                <td data-label="Access">
+                                    <div class="vault__access">
+                                        <DocumentLink Attachment="a" />
+                                        @if (a.CanDownload && Previewable(a))
+                                        {
+                                            <button type="button" class="btn btn--small" @onclick="() => PreviewAsync(a)" disabled="@Busy" data-testid="vault-preview">Preview<span class="visually-hidden"> @a.FileName</span></button>
+                                        }
+                                        <button type="button" class="btn btn--small" @onclick="() => HistoryAsync(a)" disabled="@Busy" data-testid="vault-history">History<span class="visually-hidden"> of @a.FileName</span></button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="_page" Total="_total" OnPage="GoToPage" />
+        }
+    </section>
+
+    <div class="stack">
+        @if (_selected is { } sel)
+        {
+            <section class="card vault__panel" aria-labelledby="panel-title" data-testid="vault-panel">
+                <div class="row row--between">
+                    <h2 id="panel-title" tabindex="-1" class="vault__panel-title">@sel.FileName</h2>
+                    <button type="button" class="btn btn--small" @onclick="ClosePanel" data-testid="vault-panel-close">Close<span class="visually-hidden"> file details</span></button>
+                </div>
+                <dl class="dl">
+                    <dt>Case</dt><dd>@sel.ApplicationReference</dd>
+                    <dt>Type</dt><dd>@(sel.Purpose == AttachmentPurpose.ApplicationDocument ? CaseService.Label(sel.DocumentType) : PurposeLabel(sel.Purpose))</dd>
+                    <dt>Size</dt><dd>@sel.SizeBytes.ToString("N0", Ui.Culture) bytes</dd>
+                    <dt>SHA-256</dt><dd><code class="vault__hash">@sel.Sha256</code></dd>
+                </dl>
+                @if (_previewUrl is not null)
+                {
+                    <h3>Preview</h3>
+                    @if (sel.ContentType.StartsWith("image/", StringComparison.Ordinal))
+                    {
+                        <img class="vault__preview" src="@_previewUrl" alt="Preview of @sel.FileName" data-testid="vault-preview-image" />
+                    }
+                    else
+                    {
+                        <iframe class="vault__preview vault__preview--pdf" src="@_previewUrl" title="Preview of @sel.FileName" data-testid="vault-preview-frame"></iframe>
+                    }
+                    <p class="muted">The preview link expires at @Ui.Utc(_previewExpires!.Value). Choose Preview again to renew it.</p>
+                }
+                <h3>Audit history</h3>
+                @if (_history.Count == 0)
+                {
+                    <p>No audit events recorded.</p>
+                }
+                else
+                {
+                    <ul class="timeline" data-testid="vault-history-list">
+                        @foreach (var e in _history)
+                        {
+                            <li data-action="@e.Action"><strong>@e.Summary</strong><p class="timeline__meta">@e.ActorName · @Ui.Utc(e.At)</p></li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+
+        <section class="card" aria-labelledby="upload-title" data-testid="vault-upload">
+            <h2 id="upload-title" class="vault__panel-title">Upload to a case</h2>
+            @if (_targets.Count > 0)
+            {
+                <form class="form" @onsubmit="UploadAsync" novalidate data-testid="vault-upload-form">
+                    <div class="field">
+                        <label for="u-case">Case</label>
+                        <select id="u-case" @bind="_uploadCase" aria-invalid="@Invalid("uploadCase")" aria-describedby="@Describe("uploadCase")" data-testid="vault-upload-case">
+                            <option value="">Choose a case</option>
+                            @foreach (var t in _targets)
+                            {
+                                <option value="@t.Id">@t.Reference · @(string.IsNullOrWhiteSpace(t.Title) ? "Untitled" : t.Title) (@Workflow.Display(t.Status))</option>
+                            }
+                        </select>
+                        <FieldError For="uploadCase" Messages="@Errs("uploadCase")" />
+                    </div>
+                    <div class="field">
+                        <label for="u-type">Document type</label>
+                        <select id="u-type" @bind="_uploadType" data-testid="vault-upload-type">
+                            @foreach (var t in Enum.GetValues<DocumentType>())
+                            {
+                                <option value="@t">@CaseService.Label(t)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="u-file">File</label>
+                        <InputFile id="u-file" @key="_fileKey" OnChange="e => _file = e.File" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                                   aria-invalid="@(FileErrors.Count > 0 ? "true" : null)" aria-describedby="@(FileErrors.Count > 0 ? "u-file-hint file-error" : "u-file-hint")" data-testid="vault-upload-file" />
+                        <span class="field__hint" id="u-file-hint">PDF, PNG or JPG, at most 5 MiB. Checked by type, content signature and size.</span>
+                        <FieldError For="file" Messages="FileErrors" />
+                    </div>
+                    <div><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="vault-upload-submit">Upload document</button></div>
+                </form>
+            }
+            else if (Me?.Can(Cap.CreateApplication) == true)
+            {
+                <p data-testid="vault-no-targets">You have no draft, or application waiting for information, to attach files to. <a href="applications/new">Start a new application</a>.</p>
+            }
+            else
+            {
+                <p data-testid="vault-upload-not-allowed">Documents are added by the intake coordinator who owns the case, while it is a draft or waiting for information. Your role can find and @(Me is not null && FileService.CanDownload(Me) ? "download" : "inspect") them here.</p>
+            }
+        </section>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
+    [SupplyParameterFromQuery(Name = "case")] public string? CaseParam { get; set; }
+    [SupplyParameterFromQuery(Name = "uploader")] public string? UploaderParam { get; set; }
+    [SupplyParameterFromQuery(Name = "type")] public string? TypeParam { get; set; }
+    [SupplyParameterFromQuery(Name = "purpose")] public string? PurposeParam { get; set; }
+    [SupplyParameterFromQuery(Name = "from")] public string? FromParam { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToParam { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+
+    private sealed class FilterModel
+    {
+        public string? Search { get; set; }
+        public string? Case { get; set; }
+        public string? Uploader { get; set; }
+        public DocumentType? Type { get; set; }
+        public AttachmentPurpose? Purpose { get; set; }
+        public DateOnly? From { get; set; }
+        public DateOnly? To { get; set; }
+        public FilterModel Copy() => (FilterModel)MemberwiseClone();
+    }
+
+    private FilterModel _applied = new();
+    private FilterModel _f = new();
+    private int _page = 1;
+    private IReadOnlyList<AttachmentView>? _rows;
+    private int _total;
+    private IReadOnlyList<UploadTarget> _targets = [];
+    private AttachmentView? _selected;
+    private string? _previewUrl;
+    private DateTimeOffset? _previewExpires;
+    private IReadOnlyList<AuditEvent> _history = [];
+    private bool _focusPanel;
+    private Guid? _uploadCase;
+    private DocumentType _uploadType = DocumentType.Other;
+    private IBrowserFile? _file;
+    private int _fileKey;
+
+    private bool HasFilters => !string.IsNullOrWhiteSpace(_applied.Search) || !string.IsNullOrWhiteSpace(_applied.Case) || !string.IsNullOrWhiteSpace(_applied.Uploader)
+                               || _applied.Type is not null || _applied.Purpose is not null || _applied.From is not null || _applied.To is not null;
+
+    private IReadOnlyList<string> FileErrors => [.. Errs("file"), .. (Problem?.Code == ErrorCodes.AttachmentRejected ? [Problem.Title] : Array.Empty<string>())];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        Problem = null;
+        _applied = new FilterModel
+        {
+            Search = Q, Case = CaseParam, Uploader = UploaderParam,
+            Type = Enum.TryParse<DocumentType>(TypeParam, true, out var t) ? t : null,
+            Purpose = Enum.TryParse<AttachmentPurpose>(PurposeParam, true, out var p) ? p : null,
+            From = DateOnly.TryParse(FromParam, CultureInfo.InvariantCulture, out var from) ? from : null,
+            To = DateOnly.TryParse(ToParam, CultureInfo.InvariantCulture, out var to) ? to : null,
+        };
+        _f = _applied.Copy();
+        _page = Math.Max(1, PageParam ?? 1);
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync() => await LoadAsync(async a =>
+    {
+        _targets = await Cases.UploadTargetsAsync(a);
+        var (rows, total) = await Files.VaultPageAsync(a, new VaultQuery(_applied.Search, _applied.Case, _applied.Uploader, _applied.Purpose, _applied.Type, _applied.From, _applied.To, _page));
+        _rows = rows;
+        _total = total;
+    });
+
+    private string QueryString(FilterModel f, int page)
+    {
+        var parts = new List<string>();
+        void Add(string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) parts.Add($"{key}={Uri.EscapeDataString(value.Trim())}");
+        }
+        Add("q", f.Search);
+        Add("case", f.Case);
+        Add("uploader", f.Uploader);
+        Add("type", f.Type?.ToString());
+        Add("purpose", f.Purpose?.ToString());
+        Add("from", f.From?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        Add("to", f.To?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        if (page > 1) Add("page", page.ToString(CultureInfo.InvariantCulture));
+        return parts.Count == 0 ? "" : "?" + string.Join('&', parts);
+    }
+
+    private void Apply() => Nav.NavigateTo("documents" + QueryString(_f, 1));
+
+    private void GoToPage(int page) => Nav.NavigateTo("documents" + QueryString(_applied, page));
+
+    private static bool Previewable(AttachmentView a) => a.ContentType is "application/pdf" or "image/png" or "image/jpeg";
+
+    private async Task PreviewAsync(AttachmentView a)
+    {
+        SignedLink? link = null;
+        if (await RunAsync(async actor =>
+            {
+                link = await Files.IssueLinkAsync(actor, a.Id);
+                _history = await Files.HistoryAsync(actor, a.Id);
+            }, $"Preview of {a.FileName} opened."))
+        {
+            _selected = a;
+            var query = link!.Url[link.Url.IndexOf('?')..];
+            _previewUrl = $"files/{a.Id}/preview{query}";
+            _previewExpires = link.ExpiresAt;
+            _focusPanel = true;
+        }
+    }
+
+    private async Task HistoryAsync(AttachmentView a)
+    {
+        if (await RunAsync(async actor => _history = await Files.HistoryAsync(actor, a.Id), null))
+        {
+            if (_selected?.Id != a.Id) _previewUrl = null;
+            _selected = a;
+            _focusPanel = true;
+        }
+    }
+
+    private void ClosePanel()
+    {
+        _selected = null;
+        _previewUrl = null;
+        _history = [];
+    }
+
+    private async Task UploadAsync()
+    {
+        if (_uploadCase is not { } caseId)
+        {
+            LocalError("uploadCase", "Choose the case to attach the file to.");
+            return;
+        }
+        if (_file is null)
+        {
+            LocalError("file", "Choose a file to upload.");
+            return;
+        }
+        if (_file.Size > Limits.MaxAttachmentBytes)
+        {
+            LocalError("file", $"The file is larger than 5 MiB ({Limits.MaxAttachmentBytes:N0} bytes).");
+            return;
+        }
+        var file = _file;
+        var type = _uploadType;
+        var target = _targets.First(t => t.Id == caseId);
+        if (await RunAsync(async a =>
+            {
+                await using var stream = file.OpenReadStream(Limits.MaxAttachmentBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                await Cases.UploadDocumentAsync(a, caseId, target.Version, type, new UploadFile(file.Name, file.ContentType, buffer.ToArray()));
+            }, $"{file.Name} uploaded to {target.Reference}."))
+        {
+            _file = null;
+            _fileKey++;
+            var announcement = Announcement;
+            await ReloadAsync();
+            Announcement = announcement;
+        }
+        else if (Problem?.StatusCode == 409)
+        {
+            // The case changed since the list was loaded: refresh versions so a retry uses the saved one.
+            var problem = Problem;
+            await LoadAsync(async a => _targets = await Cases.UploadTargetsAsync(a));
+            Problem = problem;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await base.OnAfterRenderAsync(firstRender);
+        if (!_focusPanel) return;
+        _focusPanel = false;
+        try
+        {
+            await Js.InvokeVoidAsync("eventPermits.focus", "#panel-title");
+        }
+        catch (JSDisconnectedException)
+        {
+            // circuit closed
+        }
+    }
+
+    private static string PurposeLabel(AttachmentPurpose p) => p switch
+    {
+        AttachmentPurpose.InformationResponse => "Information response",
+        AttachmentPurpose.IncidentPhoto => "Incident photo",
+        AttachmentPurpose.PermitPdf => "Permit PDF",
+        _ => "Application document",
+    };
+}

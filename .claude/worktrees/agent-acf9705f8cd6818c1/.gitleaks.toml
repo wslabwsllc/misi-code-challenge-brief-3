@@ -1,0 +1,10 @@
+# Gitleaks configuration for `dotnet run --project tools/Dev -- scan`.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented, deliberately public values"
+# OD-2: the fictional local demo password is published in the README on purpose (local runs only; never enabled in AWS).
+regexes = ['''EventPermits!Demo2026''']
+# Test fixtures use obviously fake keys; planning documents contain prose that trips the generic rule.
+paths = ['''tests/EventPermits\.IntegrationTests/Support/.*''', '''docs/plan/.*\.md''']

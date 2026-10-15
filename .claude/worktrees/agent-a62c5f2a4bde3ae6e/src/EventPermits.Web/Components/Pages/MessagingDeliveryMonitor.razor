@@ -1,0 +1,322 @@
+@page "/integrations/messaging"
+@attribute [Authorize(Policy = Cap.ManageNotifications)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject NotificationService NotificationSvc
+
+<PageTitle>Messaging Delivery Monitor · Memorial Event Operations</PageTitle>
+<PageHeader Title="Messaging Delivery Monitor" Lead="Email/SMS queue, gateway calls, signed webhook receipts and failed deliveries, linked by correlation ID.">
+    <Actions>
+        <button type="button" class="btn" disabled="@Busy" @onclick="RefreshAsync" data-testid="monitor-refresh">Refresh</button>
+        <a class="btn" href="/notifications">Notification Center</a>
+    </Actions>
+</PageHeader>
+
+<ProblemAlert Problem="Problem" OnRetry="RefreshAsync" />
+<LiveRegion Message="@Announcement" />
+@if (RendererInfo.IsInteractive)
+{
+    <span hidden data-testid="interactive"></span>
+}
+
+@if (_monitor is not null && _queue is not null)
+{
+    <div class="grid-4 monitor-kpis" data-testid="monitor-kpis">
+        <div class="kpi @(QueueDepth > 0 ? "kpi--warn" : "kpi--ok")">
+            <span class="kpi__value" data-testid="kpi-queued">@QueueDepth</span>
+            <span class="kpi__label">Queued · oldest @(_monitor.OldestQueuedAge is { } age ? Age(age) : "—")</span>
+        </div>
+        <div class="kpi kpi--ok">
+            <span class="kpi__value">@(_monitor.DeliveryRatePercent is { } rate ? $"{rate.ToString("0.#", Ui.Culture)}%" : "—")</span>
+            <span class="kpi__label">Delivered of messages created in the last 7 days</span>
+        </div>
+        <div class="kpi @(Count(NotificationStatus.Failed) > 0 ? "kpi--danger" : "kpi--ok")">
+            <span class="kpi__value" data-testid="kpi-failed">@Count(NotificationStatus.Failed)</span>
+            <span class="kpi__label">Failed deliveries</span>
+        </div>
+        <div class="kpi">
+            <span class="kpi__value" data-testid="kpi-duplicates">@_queue.ReceiptCounts[WebhookOutcome.Duplicate]</span>
+            <span class="kpi__label">Duplicate callbacks ignored · @Rejected rejected</span>
+        </div>
+    </div>
+
+    <form class="filters" @onsubmit="TraceAsync" @onsubmit:preventDefault novalidate data-testid="trace-form">
+        <div class="field">
+            <label for="trace-id">Trace a correlation ID</label>
+            <input id="trace-id" type="search" @bind="_traceInput" maxlength="100" aria-invalid="@Invalid("correlationId")"
+                   aria-describedby="@(Invalid("correlationId") is null ? "trace-hint" : "trace-hint trace-id-error")" data-testid="trace-id" />
+            <span class="field__hint" id="trace-hint">Shows only the queued message, failure and gateway calls that carry this ID.</span>
+            <FieldError Errors="@Problem?.For("correlationId")" Id="trace-id-error" />
+        </div>
+        <div class="row">
+            <button type="submit" class="btn btn--primary" data-testid="trace-apply">Trace</button>
+            @if (!string.IsNullOrEmpty(Trace))
+            {
+                <a class="btn" href="@Link(null, Outcome, 1)">Show all</a>
+            }
+        </div>
+    </form>
+
+    <section aria-labelledby="failed-title">
+        <h2 id="failed-title">Failed deliveries</h2>
+        @if (Failed.Count == 0)
+        {
+            <EmptyState Title="No failed deliveries"><p>Messages the gateway could not deliver appear here with a safe retry.</p></EmptyState>
+        }
+        else
+        {
+            <div class="card card--flush">
+                <div class="table-wrap">
+                    <table class="table table--cards" data-testid="failed-table">
+                        <caption class="visually-hidden">Failed messages, newest first</caption>
+                        <thead><tr><th scope="col">Message</th><th scope="col">Recipient</th><th scope="col" class="num">Attempts</th><th scope="col">Error</th><th scope="col">Correlation</th><th scope="col">Retry</th></tr></thead>
+                        <tbody>
+                            @foreach (var n in Failed)
+                            {
+                                <tr data-testid="failed-row">
+                                    <td data-label="Message"><a href="/notifications?id=@n.Id">@n.Subject</a><br /><span class="muted">@(n.Reference ?? "No case") · @n.TemplateCode · @Ui.Utc(n.CreatedAt)</span></td>
+                                    <td data-label="Recipient" class="wrap">@n.Recipient</td>
+                                    <td data-label="Attempts" class="num">@n.Attempts</td>
+                                    <td data-label="Error" class="wrap">@(n.LastError ?? "—")</td>
+                                    <td data-label="Correlation"><a class="wrap mono" href="@Link(n.CorrelationId, Outcome, ReceiptPage)">@n.CorrelationId</a></td>
+                                    <td data-label="Retry">
+                                        @if (_confirm == n.Id)
+                                        {
+                                            <span class="row">
+                                                <button type="button" class="btn btn--small btn--primary" disabled="@Busy" @onclick="() => RetryAsync(n)" data-testid="retry-confirm">Yes, retry</button>
+                                                <button type="button" class="btn btn--small" @onclick="() => _confirm = null">Cancel</button>
+                                            </span>
+                                        }
+                                        else
+                                        {
+                                            <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => _confirm = n.Id" data-testid="retry">Retry<span class="visually-hidden"> @n.Subject</span></button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </section>
+
+    <section aria-labelledby="queue-title">
+        <h2 id="queue-title">Queue (oldest first)</h2>
+        @if (Queued.Count == 0)
+        {
+            <EmptyState Title="The queue is empty"><p>The worker sends queued messages to the gateway within seconds.</p></EmptyState>
+        }
+        else
+        {
+            <div class="card card--flush">
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact" data-testid="queue-table">
+                        <caption class="visually-hidden">Queued messages</caption>
+                        <thead><tr><th scope="col">Queued</th><th scope="col">Message</th><th scope="col">Recipient</th><th scope="col" class="num">Attempts</th><th scope="col">Last error</th></tr></thead>
+                        <tbody>
+                            @foreach (var n in Queued)
+                            {
+                                <tr data-testid="queue-row">
+                                    <td data-label="Queued">@Ui.Utc(n.CreatedAt)</td>
+                                    <td data-label="Message"><a href="/notifications?id=@n.Id">@n.Subject</a><br /><span class="muted">@n.TemplateCode · @n.Channel</span></td>
+                                    <td data-label="Recipient" class="wrap">@n.Recipient</td>
+                                    <td data-label="Attempts" class="num">@n.Attempts</td>
+                                    <td data-label="Last error" class="wrap">@(n.LastError ?? "—")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </section>
+
+    <section aria-labelledby="receipts-title">
+        <h2 id="receipts-title">Webhook receipts</h2>
+        <form class="filters" @onsubmit="FilterReceipts" @onsubmit:preventDefault novalidate>
+            <div class="field">
+                <label for="receipt-outcome">Outcome</label>
+                <select id="receipt-outcome" @bind="_outcomeInput" data-testid="receipt-outcome">
+                    <option value="">All outcomes</option>
+                    @foreach (var o in Enum.GetValues<WebhookOutcome>())
+                    {
+                        <option value="@o">@OutcomeText(o) (@_queue.ReceiptCounts[o])</option>
+                    }
+                </select>
+            </div>
+            <div class="row"><button type="submit" class="btn" data-testid="receipt-apply">Show</button></div>
+        </form>
+        @if (_receipts is null || _receipts.Count == 0)
+        {
+            <EmptyState Title="No webhook receipts"><p>Signed delivery callbacks from the gateway are stored here, accepted or rejected.</p></EmptyState>
+        }
+        else
+        {
+            <div class="card card--flush">
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact" data-testid="receipts-table">
+                        <caption class="visually-hidden">Webhook receipts, newest first</caption>
+                        <thead><tr><th scope="col">Received</th><th scope="col">Outcome</th><th scope="col">Event</th><th scope="col">Reported</th><th scope="col">Reason</th><th scope="col">Message</th></tr></thead>
+                        <tbody>
+                            @foreach (var r in _receipts)
+                            {
+                                <tr data-testid="receipt-row" data-outcome="@r.Outcome">
+                                    <td data-label="Received">@Ui.Utc(r.ReceivedAt)</td>
+                                    <td data-label="Outcome"><span class="chip @OutcomeCss(r.Outcome)">@OutcomeText(r.Outcome)</span></td>
+                                    <td data-label="Event" class="wrap mono">@(r.EventId ?? "—")</td>
+                                    <td data-label="Reported">@(r.ReportedStatus ?? "—")</td>
+                                    <td data-label="Reason" class="wrap">@r.Reason</td>
+                                    <td data-label="Message">
+                                        @if (r.NotificationId is { } nid)
+                                        {
+                                            <a href="/notifications?id=@nid">Open message</a>
+                                        }
+                                        else
+                                        {
+                                            <span class="muted wrap">@(r.MessageId ?? "—")</span>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <Pager Page="ReceiptPage" Total="_receiptTotal" OnPage="p => Nav.NavigateTo(Link(Trace, Outcome, p))" />
+            </div>
+        }
+    </section>
+
+    <section aria-labelledby="attempts-title">
+        <h2 id="attempts-title">Gateway calls</h2>
+        @if (Attempts.Count == 0)
+        {
+            <EmptyState Title="No gateway calls recorded"><p>Every call to the notification gateway is recorded here with its outcome and timing.</p></EmptyState>
+        }
+        else
+        {
+            <div class="card card--flush">
+                <div class="table-wrap">
+                    <table class="table table--cards table--compact" data-testid="attempts-table">
+                        <caption class="visually-hidden">Recent notification gateway calls, newest first</caption>
+                        <thead><tr><th scope="col">At</th><th scope="col">Call</th><th scope="col">Outcome</th><th scope="col" class="num">Duration</th><th scope="col">Attempt</th><th scope="col">Correlation</th></tr></thead>
+                        <tbody>
+                            @foreach (var a in Attempts)
+                            {
+                                <tr data-testid="attempt-row">
+                                    <td data-label="At">@Ui.Utc(a.At)</td>
+                                    <td data-label="Call" class="wrap">@a.Method @a.Url<br /><span class="muted">@a.Operation@(a.Error is null ? "" : $" · {a.Error}")</span></td>
+                                    <td data-label="Outcome"><span class="chip @(a.Outcome == AttemptOutcome.Success ? "chip--good" : a.Outcome == AttemptOutcome.ClientError ? "chip--attention" : "chip--bad")">@a.Outcome@(a.StatusCode is { } sc ? $" · {sc}" : "")</span></td>
+                                    <td data-label="Duration" class="num">@a.DurationMs ms</td>
+                                    <td data-label="Attempt">#@a.AttemptNumber</td>
+                                    <td data-label="Correlation"><a class="wrap mono" href="@Link(a.CorrelationId, Outcome, ReceiptPage)">@a.CorrelationId</a></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </section>
+}
+else if (Loading)
+{
+    <p role="status">Loading delivery data…</p>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "trace")] public string? Trace { get; set; }
+    [SupplyParameterFromQuery(Name = "outcome")] public string? OutcomeQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageQuery { get; set; }
+
+    private MessagingMonitor? _monitor;
+    private MessagingQueue? _queue;
+    private IReadOnlyList<WebhookReceipt>? _receipts;
+    private int _receiptTotal;
+    private Guid? _confirm;
+    private string _traceInput = "";
+    private string _outcomeInput = "";
+
+    private WebhookOutcome? Outcome => Enum.TryParse<WebhookOutcome>(OutcomeQuery, out var o) ? o : null;
+    private int ReceiptPage => Math.Max(1, PageQuery ?? 1);
+    private int QueueDepth => Count(NotificationStatus.Queued);
+    private int Rejected => _queue is null ? 0 : _queue.ReceiptCounts[WebhookOutcome.RejectedSignature] + _queue.ReceiptCounts[WebhookOutcome.RejectedTimestamp] + _queue.ReceiptCounts[WebhookOutcome.RejectedPayload];
+    private int Count(NotificationStatus s) => _monitor?.Counts.TryGetValue(s, out var c) == true ? c : 0;
+    private IReadOnlyList<NotificationRow> Failed => Matching(_monitor?.Failed ?? [], n => n.CorrelationId);
+    private IReadOnlyList<NotificationRow> Queued => Matching(_queue?.Queued ?? [], n => n.CorrelationId);
+    private IReadOnlyList<GatewayAttemptRow> Attempts => Matching(_queue?.Attempts ?? [], a => a.CorrelationId);
+
+    private IReadOnlyList<T> Matching<T>(IReadOnlyList<T> rows, Func<T, string> correlation) =>
+        string.IsNullOrEmpty(Trace) ? rows : rows.Where(r => string.Equals(correlation(r), Trace, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _traceInput = Trace ?? "";
+        _outcomeInput = Outcome?.ToString() ?? "";
+        await RefreshAsync();
+    }
+
+    private async Task RefreshAsync()
+    {
+        Problem = null;
+        _confirm = null;
+        await LoadAsync(async actor =>
+        {
+            _monitor = await NotificationSvc.MonitorAsync(actor);
+            _queue = await NotificationSvc.QueueAsync(actor);
+            (_receipts, _receiptTotal) = await NotificationSvc.ReceiptsAsync(actor, Outcome, ReceiptPage);
+        });
+    }
+
+    private async Task TraceAsync()
+    {
+        var text = _traceInput.Trim();
+        if (text.Length > 0 && (text.Length < 8 || text.Any(char.IsWhiteSpace)))
+        {
+            await RunAsync(_ => throw ValidationException.For("correlationId", "A correlation ID is at least 8 characters without spaces."));
+            return;
+        }
+        Nav.NavigateTo(Link(text, Outcome, ReceiptPage));
+    }
+
+    private void FilterReceipts() => Nav.NavigateTo(Link(Trace, Enum.TryParse<WebhookOutcome>(_outcomeInput, out var o) ? o : null, 1));
+
+    private static string Link(string? trace, WebhookOutcome? outcome, int page)
+    {
+        var q = new List<string>();
+        if (!string.IsNullOrEmpty(trace)) q.Add($"trace={Uri.EscapeDataString(trace)}");
+        if (outcome is { } o) q.Add($"outcome={o}");
+        if (page > 1) q.Add($"page={page}");
+        return "/integrations/messaging" + (q.Count > 0 ? "?" + string.Join("&", q) : "");
+    }
+
+    private async Task RetryAsync(NotificationRow n)
+    {
+        var ok = await RunAsync(async actor => await NotificationSvc.RetryAsync(actor, n.Id, n.Version), $"“{n.Subject}” queued for another attempt.");
+        var problem = Problem;
+        var announcement = Announcement;
+        await RefreshAsync();
+        if (!ok) Problem = problem;
+        Announcement = announcement;
+    }
+
+    private static string Age(TimeSpan age) => age.TotalMinutes < 1 ? $"{age.TotalSeconds:0} s" : age.TotalHours < 1 ? $"{age.TotalMinutes:0} min" : age.TotalDays < 1 ? $"{age.TotalHours:0.#} h" : $"{age.TotalDays:0.#} d";
+
+    private static string OutcomeText(WebhookOutcome o) => o switch
+    {
+        WebhookOutcome.Accepted => "Accepted",
+        WebhookOutcome.Duplicate => "Duplicate (ignored)",
+        WebhookOutcome.Ignored => "Ignored",
+        WebhookOutcome.RejectedSignature => "Rejected: signature",
+        WebhookOutcome.RejectedTimestamp => "Rejected: timestamp",
+        _ => "Rejected: payload",
+    };
+
+    private static string OutcomeCss(WebhookOutcome o) => o switch
+    {
+        WebhookOutcome.Accepted => "chip--good",
+        WebhookOutcome.Duplicate or WebhookOutcome.Ignored => "chip--draft",
+        _ => "chip--bad",
+    };
+}

@@ -1,0 +1,493 @@
+@page "/permits"
+@attribute [Authorize(Policy = Cap.ViewPermits)]
+@rendermode InteractiveServer
+@inherits DecisionPage
+@using EventPermits.Application.Services
+@inject PermitService PermitSvc
+@inject ApprovalService ApprovalSvc
+
+<PageTitle>Permit Center · Memorial Event Operations</PageTitle>
+<PageHeader Title="Permit Center"
+            Lead="@(CanManage ? "Issue permits for approved cases, then download, reissue or revoke them. Every version is immutable and carries its own signed check-in code." : "Permit metadata and version history. Your role can review permits but not download the documents.")" />
+<LiveRegion Message="@Announcement" />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+@if (_issue is not null)
+{
+    var r = _issue;
+    var blocked = r.SevereWeather && !r.WeatherAcknowledged;
+    <section class="card panel" aria-labelledby="issue-title" data-testid="issue-panel" data-case="@r.Reference">
+        <div class="row row--between">
+            <h2 id="issue-title" tabindex="-1">Issue the permit for @r.Reference</h2>
+            <a class="btn btn--small" href="@ListUrl()" data-testid="issue-close">Close</a>
+        </div>
+        <p class="muted">@r.Title · @r.Venue · @(r.StartUtc is { } st ? Local(st, r.TimeZoneId) : "—") · record version @r.Version</p>
+        @if (IsConflict && ConflictRows is not null)
+        {
+            <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyIssueAsync" />
+        }
+        @if (r.SevereWeather)
+        {
+            @if (r.WeatherAcknowledged)
+            {
+                <p class="notice" data-testid="weather-acknowledged">Severe weather advisory for the event date: acknowledged by a manager. Issuance is allowed.</p>
+            }
+            else
+            {
+                <div class="alert alert--warning" id="weather-block" data-testid="weather-block">
+                    <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span> <strong>Severe weather advisory for the event date</strong></p>
+                    <p>A manager must acknowledge the advisory with a note before the permit is issued (A-19). Advisories never cancel a case.</p>
+                    <form class="form" @onsubmit="AcknowledgeAsync" novalidate data-testid="ack-form">
+                        <div class="field">
+                            <label for="ack-note">Acknowledgement note</label>
+                            <textarea id="ack-note" @bind="_ackNote" aria-invalid="@Invalid("note")" aria-describedby="@Describe("note", "ack-note", hint: true)" data-testid="ack-note"></textarea>
+                            <span class="field__hint" id="ack-note-hint">@Limits.ReasonMin to @Limits.ReasonMax characters, e.g. the mitigation agreed with the applicant.</span>
+                            <FieldError Problem="Problem" Field="note" Id="ack-note" />
+                        </div>
+                        <div class="row"><button type="submit" class="btn" disabled="@Busy" data-testid="ack-submit">Acknowledge advisory</button></div>
+                    </form>
+                </div>
+            }
+        }
+        <form class="form" @onsubmit="IssueAsync" novalidate data-testid="issue-form">
+            <div class="field">
+                <label for="conditions">Conditions and restrictions</label>
+                <textarea id="conditions" class="tall" @bind="_conditions" aria-invalid="@Invalid("conditions")" aria-describedby="@Describe("conditions", "conditions", hint: true)" data-testid="issue-conditions"></textarea>
+                <span class="field__hint" id="conditions-hint">Printed on the permit PDF. Up to 3,000 characters; leave empty to use the standard conditions.</span>
+                <FieldError Problem="Problem" Field="conditions" Id="conditions" />
+            </div>
+            <div class="row">
+                <button type="submit" class="btn btn--primary" disabled="@(Busy || blocked)" aria-describedby="@(blocked ? "weather-block" : null)" data-testid="issue-submit">Issue permit (T10)</button>
+            </div>
+        </form>
+    </section>
+}
+
+@if (_detail is not null)
+{
+    var d = _detail;
+    var current = d.Versions.FirstOrDefault(v => v.VersionNumber == d.CurrentVersion);
+    <section class="card panel" aria-labelledby="permit-title" data-testid="permit-detail" data-number="@d.Number">
+        <div class="row row--between">
+            <h2 id="permit-title" tabindex="-1">Permit @d.Number</h2>
+            <a class="btn btn--small" href="@ListUrl()" data-testid="permit-close">Close</a>
+        </div>
+        <p class="row">
+            <span class="chip @PermitClass(d.Status)" data-testid="permit-status">@d.Status</span>
+            <span class="muted">Case <a href="/applications/@d.ApplicationId">@d.Reference</a> (@Workflow.Display(d.CaseStatus)) · @d.Title · current version v@(d.CurrentVersion)</span>
+        </p>
+        @if (IsConflict && ConflictRows is not null)
+        {
+            <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyPermitActionAsync" />
+        }
+        <h3>Version history</h3>
+        <div class="table-wrap">
+            <table class="table table--cards table--compact" data-testid="version-history">
+                <caption>Every issued version, newest first. Versions never change; only their status does.</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Version</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Issued</th>
+                        <th scope="col">Schedule</th>
+                        <th scope="col">Notes</th>
+                        <th scope="col">Document</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var v in d.Versions)
+                    {
+                        <tr data-testid="version-row" data-version="@v.VersionNumber">
+                            <td data-label="Version">v@(v.VersionNumber)</td>
+                            <td data-label="Status"><span class="chip @VersionClass(v.Status)">@v.Status</span></td>
+                            <td data-label="Issued">@Ui.Utc(v.IssuedAt)<br /><span class="muted">by @v.IssuedByName</span></td>
+                            <td data-label="Schedule">@v.VenueName<br /><span class="muted">@Local(v.StartUtc, d.TimeZoneId) – @Ui.LocalTime(v.EndUtc, d.TimeZoneId)</span></td>
+                            <td data-label="Notes">
+                                @if (v.ReissueReason is not null) { <div>Reissued: @v.ReissueReason</div> }
+                                @if (v.RevokedAt is { } ra) { <div>Revoked @Ui.Utc(ra) by @v.RevokedBy: @v.RevokedReason</div> }
+                                <div class="muted">Check-in code valid until @Ui.Utc(v.TokenExpiresAt)</div>
+                            </td>
+                            <td data-label="Document">
+                                <span class="muted mono" title="SHA-256 of the PDF">sha256 @v.PdfSha256[..Math.Min(12, v.PdfSha256.Length)]…</span><br />
+                                @if (v.PdfAttachmentId is { } pdf)
+                                {
+                                    <FileLink AttachmentId="pdf" FileName="@($"{d.Number}-v{v.VersionNumber}.pdf")" CanDownload="d.CanDownload" />
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (CanManage && d.CaseStatus == CaseStatus.Permitted)
+        {
+            <form class="form permit-action" @onsubmit="PermitActionAsync" novalidate data-testid="permit-action-form" aria-labelledby="permit-action-title">
+                <h3 id="permit-action-title">Change this permit</h3>
+                <fieldset>
+                    <legend>Action</legend>
+                    <div class="check"><input type="radio" id="pa-reissue" name="permit-action" checked="@(_action == "reissue")" @onchange="@(() => ChooseAction("reissue"))" data-testid="action-reissue" /><label for="pa-reissue">Reissue a new version (the current code stops working)</label></div>
+                    @if (d.Status == PermitStatus.Active)
+                    {
+                        <div class="check"><input type="radio" id="pa-revoke" name="permit-action" checked="@(_action == "revoke")" @onchange="@(() => ChooseAction("revoke"))" data-testid="action-revoke" /><label for="pa-revoke">Revoke the current version (A-11)</label></div>
+                    }
+                </fieldset>
+                <div class="field">
+                    <label for="permit-reason">@(_action == "revoke" ? "Revocation justification" : "Reissue reason")</label>
+                    <textarea id="permit-reason" @bind="_permitReason" aria-invalid="@Invalid("reason")" aria-describedby="@Describe("reason", "permit-reason", hint: true)" data-testid="permit-reason"></textarea>
+                    <span class="field__hint" id="permit-reason-hint">@Limits.ReasonMin to @Limits.ReasonMax characters; recorded in the audit trail and sent to the coordinator.</span>
+                    <FieldError Problem="Problem" Field="reason" Id="permit-reason" />
+                </div>
+                @if (_action == "reissue")
+                {
+                    <div class="field">
+                        <label for="reissue-conditions">Conditions for the new version</label>
+                        <textarea id="reissue-conditions" class="tall" @bind="_reissueConditions" aria-invalid="@Invalid("conditions")" aria-describedby="@Describe("conditions", "reissue-conditions", hint: true)" data-testid="reissue-conditions"></textarea>
+                        <span class="field__hint" id="reissue-conditions-hint">Prefilled from version @(current?.VersionNumber); up to 3,000 characters.</span>
+                        <FieldError Problem="Problem" Field="conditions" Id="reissue-conditions" />
+                    </div>
+                }
+                <div class="row">
+                    <button type="submit" class="btn @(_action == "revoke" ? "btn--danger" : "btn--primary")" disabled="@Busy" data-testid="permit-action-submit">@(_action == "revoke" ? "Revoke permit" : "Reissue permit")</button>
+                </div>
+            </form>
+        }
+        else if (!CanManage)
+        {
+            <p class="notice" data-testid="permit-metadata-only">Metadata only: your role can review versions and history, not download documents or change permits.</p>
+        }
+    </section>
+}
+
+@if (CanManage)
+{
+    <section aria-labelledby="ready-title">
+        <h2 id="ready-title">Ready to issue</h2>
+        @if (_ready is null)
+        {
+            <p role="status">Loading…</p>
+        }
+        else if (_ready.Count == 0)
+        {
+            <EmptyState Title="No approved cases are waiting for a permit">
+                <p>Approved cases from the <a href="/approvals">Approval Workspace</a> appear here.</p>
+            </EmptyState>
+        }
+        else
+        {
+            <div class="card card--flush">
+                <div class="table-wrap">
+                    <table class="table table--cards" data-testid="ready-table">
+                        <caption>@Ui.Plural(_ready.Count, "approved case", "approved cases") without a permit, earliest event first</caption>
+                        <thead><tr><th scope="col">Case</th><th scope="col">Venue and time</th><th scope="col">Weather</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
+                        <tbody>
+                            @foreach (var r in _ready)
+                            {
+                                <tr data-testid="ready-row" data-reference="@r.Reference">
+                                    <td data-label="Case"><strong>@r.Reference</strong><br />@r.Title</td>
+                                    <td data-label="Venue and time">@r.Venue<br /><span class="muted">@(r.StartUtc is { } st ? Local(st, r.TimeZoneId) : "—")</span></td>
+                                    <td data-label="Weather"><span class="chip @(r.SevereWeather ? (r.WeatherAcknowledged ? "chip--attention" : "chip--bad") : "chip--outline")">@(r.SevereWeather ? (r.WeatherAcknowledged ? "Severe, acknowledged" : "Severe advisory") : "No severe advisory")</span></td>
+                                    <td data-label="Action"><a class="btn btn--small btn--primary" href="@IssueUrl(r.ApplicationId)" data-testid="issue-open">Issue permit<span class="visually-hidden"> for @r.Reference</span></a></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </section>
+}
+
+<section aria-labelledby="permits-title">
+    <h2 id="permits-title">Permits</h2>
+    <form class="filters" @onsubmit="ApplyFilters" novalidate role="search" aria-label="Filter permits">
+        <div class="field">
+            <label for="p-search">Search</label>
+            <input id="p-search" type="search" @bind="_search" placeholder="Permit number, case or event" data-testid="permit-search" />
+        </div>
+        <div class="field">
+            <label for="p-status">Status</label>
+            <select id="p-status" @bind="_status" data-testid="permit-status-filter">
+                <option value="">Any status</option>
+                @foreach (var s in Enum.GetValues<PermitStatus>())
+                {
+                    <option value="@s">@s</option>
+                }
+            </select>
+        </div>
+        <div class="row">
+            <button type="submit" class="btn btn--primary" data-testid="permit-filter-apply">Apply filters</button>
+            @if (Filtered)
+            {
+                <a class="btn btn--quiet" href="/permits">Clear</a>
+            }
+        </div>
+    </form>
+    @if (Loading && _permits is null)
+    {
+        <p role="status">Loading permits…</p>
+    }
+    else if (_permits is { Count: 0 })
+    {
+        <EmptyState Title="@(Filtered ? "No permits match these filters" : "No permits issued yet")">
+            <p>@(Filtered ? "Clear the filters to see every permit." : "Permits appear here once an approved case is issued its permit.")</p>
+        </EmptyState>
+    }
+    else if (_permits is not null)
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="permit-table">
+                    <caption>@Ui.Plural(_permitTotal, "permit", "permits"), most recently issued first</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Permit</th>
+                            <th scope="col">Case and event</th>
+                            <th scope="col">Venue and time</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Current version</th>
+                            <th scope="col"><span class="visually-hidden">Action</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var p in _permits)
+                        {
+                            <tr data-testid="permit-row" data-number="@p.Number" data-reference="@p.Reference" class="@(p.PermitId == PermitId ? "is-selected" : null)">
+                                <td data-label="Permit"><strong>@p.Number</strong></td>
+                                <td data-label="Case and event"><a href="/applications/@p.ApplicationId">@p.Reference</a><br /><span class="muted">@p.Title</span></td>
+                                <td data-label="Venue and time">@p.Venue<br /><span class="muted">@Local(p.StartUtc, p.TimeZoneId)</span></td>
+                                <td data-label="Status"><span class="chip @PermitClass(p.Status)">@p.Status</span></td>
+                                <td data-label="Current version">v@(p.CurrentVersion) <span class="muted">(@p.CurrentVersionStatus)</span><br /><span class="muted">@Ui.Utc(p.IssuedAt) by @p.IssuedBy</span></td>
+                                <td data-label="Action"><a class="btn btn--small" href="@PermitUrl(p.PermitId)" data-testid="permit-open">Details<span class="visually-hidden"> of @p.Number</span></a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="PageNumber" Total="_permitTotal" OnPage="GoToPage" />
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
+    [SupplyParameterFromQuery(Name = "status")] public string? StatusText { get; set; }
+
+    // Enum query values are not bound by Blazor; parse the text (unknown values mean "any status").
+    private PermitStatus? StatusParam => Enum.TryParse<PermitStatus>(StatusText, true, out var s) ? s : null;
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+    [SupplyParameterFromQuery(Name = "issue")] public Guid? IssueId { get; set; }
+    [SupplyParameterFromQuery(Name = "permit")] public Guid? PermitId { get; set; }
+
+    private IReadOnlyList<IssueQueueRow>? _ready;
+    private IReadOnlyList<PermitRow>? _permits;
+    private int _permitTotal;
+    private IssueQueueRow? _issue;
+    private PermitDetail? _detail;
+    private Guid? _openedIssue, _openedPermit;
+
+    private string? _search;
+    private string _status = "";
+    private string? _conditions, _ackNote, _permitReason, _reissueConditions;
+    private string _action = "reissue";
+
+    private bool CanManage => Me?.Can(Cap.ManagePermits) == true;
+    private int PageNumber => Math.Max(1, PageParam ?? 1);
+    private bool Filtered => !string.IsNullOrWhiteSpace(Q) || StatusParam is not null;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!RendererInfo.IsInteractive) return;
+        _search = Q;
+        _status = StatusParam?.ToString() ?? "";
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (Problem?.StatusCode != 409) Problem = null;
+        await LoadAsync(async actor =>
+        {
+            var manage = actor.Can(Cap.ManagePermits);
+            _ready = manage ? await PermitSvc.ReadyToIssueAsync(actor) : null;
+            (_permits, _permitTotal) = await PermitSvc.ListAsync(actor, Q, StatusParam, PageNumber);
+            _issue = manage && IssueId is { } iid ? _ready!.FirstOrDefault(r => r.ApplicationId == iid) : null;
+            if (_issue?.ApplicationId != _openedIssue)
+            {
+                _conditions = PermitService.DefaultConditions;
+                _ackNote = null;
+                ConflictRows = null;
+                if (_issue is not null) FocusAfterRender("#issue-title");
+            }
+            _openedIssue = _issue?.ApplicationId;
+
+            _detail = PermitId is { } pid ? await PermitSvc.DetailAsync(actor, pid) : null;
+            if (_detail?.PermitId != _openedPermit)
+            {
+                ResetPermitForm();
+                if (_detail is not null) FocusAfterRender("#permit-title");
+            }
+            _openedPermit = _detail?.PermitId;
+        });
+    }
+
+    private void ResetPermitForm()
+    {
+        _action = "reissue";
+        _permitReason = null;
+        _reissueConditions = _detail?.Versions.FirstOrDefault(v => v.VersionNumber == _detail.CurrentVersion)?.Conditions;
+        ConflictRows = null;
+    }
+
+    private string ListUrl() => Nav.GetUriWithQueryParameters("/permits", new Dictionary<string, object?> { ["q"] = Q, ["status"] = StatusParam?.ToString(), ["page"] = PageParam });
+    private string IssueUrl(Guid applicationId) => Nav.GetUriWithQueryParameters("/permits", new Dictionary<string, object?> { ["q"] = Q, ["status"] = StatusParam?.ToString(), ["page"] = PageParam, ["issue"] = applicationId });
+    private string PermitUrl(Guid permitId) => Nav.GetUriWithQueryParameters("/permits", new Dictionary<string, object?> { ["q"] = Q, ["status"] = StatusParam?.ToString(), ["page"] = PageParam, ["permit"] = permitId });
+
+    private void ApplyFilters() => Nav.NavigateTo(Nav.GetUriWithQueryParameters("/permits", new Dictionary<string, object?>
+    {
+        ["q"] = string.IsNullOrWhiteSpace(_search) ? null : _search.Trim(),
+        ["status"] = Enum.TryParse<PermitStatus>(_status, out var s) ? s.ToString() : null,
+        ["page"] = null, ["issue"] = null, ["permit"] = null,
+    }));
+
+    private void GoToPage(int page) => Nav.NavigateTo(Nav.GetUriWithQueryParameter("page", page));
+
+    private void ChooseAction(string action)
+    {
+        _action = action;
+        if (Problem?.StatusCode == 400) Problem = null;
+    }
+
+    private async Task AcknowledgeAsync()
+    {
+        if (_issue is null) return;
+        if (ClientInvalid(new FieldChecks().Text("note", _ackNote, Limits.ReasonMin, Limits.ReasonMax, "Acknowledgement note"))) return;
+        var r = _issue;
+        var ok = await RunAsync(async actor => await ApprovalSvc.AcknowledgeWeatherAsync(actor, r.ApplicationId, r.Version, _ackNote),
+            $"Severe weather advisory acknowledged for {r.Reference}. The permit can now be issued.");
+        if (ok) await ReloadAsync();
+        else if (IsConflict) BuildIssueConflict(r, "Acknowledge the advisory");
+    }
+
+    private async Task IssueAsync()
+    {
+        if (_issue is null) return;
+        if (ClientInvalid(new FieldChecks().Text("conditions", _conditions, 0, 3000, "Conditions", false))) return;
+        var r = _issue;
+        var ok = await RunAsync(async actor => await PermitSvc.IssueAsync(actor, r.ApplicationId, r.Version, _conditions),
+            $"Permit issued for {r.Reference} (T10). Version 1 is active and the coordinator is notified.");
+        if (ok)
+        {
+            _openedIssue = null;
+            Nav.NavigateTo(Nav.GetUriWithQueryParameters("/permits", new Dictionary<string, object?> { ["q"] = r.Reference }));
+            FocusAfterRender("#permits-title");
+        }
+        else if (IsConflict)
+        {
+            BuildIssueConflict(r, "Issue the permit");
+        }
+    }
+
+    private void BuildIssueConflict(IssueQueueRow mine, string action)
+    {
+        ConflictRows =
+        [
+            new("Case status", "Changed by someone else (reload to see it)", "Approved"),
+            new("Record version", null, mine.Version.ToString()),
+            new("Your action", null, action),
+        ];
+    }
+
+    private async Task ReapplyIssueAsync()
+    {
+        Problem = null;
+        ConflictRows = null;
+        var conditions = _conditions;
+        var note = _ackNote;
+        await ReloadAsync();
+        _conditions = conditions;
+        _ackNote = note;
+        if (_issue is null) return;
+        if (_issue.SevereWeather && !_issue.WeatherAcknowledged && !string.IsNullOrWhiteSpace(note)) await AcknowledgeAsync();
+        else await IssueAsync();
+    }
+
+    private async Task PermitActionAsync()
+    {
+        if (_detail is null) return;
+        var checks = new FieldChecks().Text("reason", _permitReason, Limits.ReasonMin, Limits.ReasonMax, _action == "revoke" ? "Revocation justification" : "Reissue reason");
+        if (_action == "reissue") checks.Text("conditions", _reissueConditions, 0, 3000, "Conditions", false);
+        if (ClientInvalid(checks)) return;
+        var d = _detail;
+        var revoke = _action == "revoke";
+        var ok = await RunAsync(async actor =>
+        {
+            if (revoke) await PermitSvc.RevokeAsync(actor, d.ApplicationId, d.CaseVersion, _permitReason);
+            else await PermitSvc.ReissueAsync(actor, d.ApplicationId, d.CaseVersion, _permitReason, _reissueConditions);
+        }, revoke
+            ? $"Permit {d.Number} v{d.CurrentVersion} revoked. Check-in now rejects its code; reissue or cancel the case next."
+            : $"Permit {d.Number} reissued as v{d.CurrentVersion + 1}. Version {d.CurrentVersion} is superseded and its code no longer works.");
+        if (ok)
+        {
+            _openedPermit = null;
+            await ReloadAsync();
+        }
+        else if (IsConflict)
+        {
+            PermitDetail? fresh = null;
+            try
+            {
+                fresh = await PermitSvc.DetailAsync(await GetActorAsync(), d.PermitId);
+            }
+            catch (AppException)
+            {
+                // keep null
+            }
+            ConflictRows =
+            [
+                new("Permit status", fresh?.Status.ToString(), d.Status.ToString()),
+                new("Current version", fresh is null ? null : $"v{fresh.CurrentVersion}", $"v{d.CurrentVersion}"),
+                new("Case status", fresh is null ? null : Workflow.Display(fresh.CaseStatus), Workflow.Display(d.CaseStatus)),
+                new("Record version", fresh?.CaseVersion.ToString(), d.CaseVersion.ToString()),
+                new("Your action", null, $"{(revoke ? "Revoke" : "Reissue")}: {_permitReason}"),
+            ];
+        }
+    }
+
+    private async Task ReapplyPermitActionAsync()
+    {
+        var reason = _permitReason;
+        var conditions = _reissueConditions;
+        var action = _action;
+        Problem = null;
+        ConflictRows = null;
+        await ReloadAsync();
+        _permitReason = reason;
+        _reissueConditions = conditions;
+        _action = action;
+        await PermitActionAsync();
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        Problem = null;
+        ConflictRows = null;
+        _openedIssue = null;
+        _openedPermit = null;
+        await ReloadAsync();
+    }
+
+    private static string PermitClass(PermitStatus s) => s switch
+    {
+        PermitStatus.Active => "chip--good",
+        PermitStatus.Revoked => "chip--bad",
+        _ => "chip--draft",
+    };
+
+    private static string VersionClass(PermitVersionStatus s) => s switch
+    {
+        PermitVersionStatus.Active => "chip--good",
+        PermitVersionStatus.Revoked => "chip--bad",
+        _ => "chip--draft",
+    };
+}

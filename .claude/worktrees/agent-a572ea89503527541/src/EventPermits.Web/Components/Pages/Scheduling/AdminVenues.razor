@@ -1,0 +1,888 @@
+@page "/admin/venues"
+@attribute [Authorize(Policy = Cap.ViewVenues)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@inject AdminService Admin
+
+<PageTitle>Venues · Memorial Event Operations</PageTitle>
+<PageHeader Title="Administration: Venues" Lead="Locations, capacities, opening hours, closure windows, stock and event categories. Records are deactivated, never deleted." />
+<ProblemAlert Problem="Problem" OnRetry="LoadAllAsync" />
+<LiveRegion Message="@Announcement" />
+
+@if (Me is not null && !CanManage)
+{
+    <div class="alert alert--info" role="note" data-testid="read-only">
+        <p class="alert__title"><strong>Read only</strong></p>
+        <p>Scheduling Officers can see venues, closures, stock and categories here. Only a System Admin can change them, and nobody can book inside a closure.</p>
+    </div>
+}
+
+<nav class="subnav" aria-label="Venue administration sections">
+    <ul>
+        @foreach (var (key, label) in Tabs)
+        {
+            <li><a href="@TabHref(key)" aria-current="@(_tab == key ? "page" : null)" data-testid="tab-@key">@label</a></li>
+        }
+    </ul>
+</nav>
+
+@if (_conflictRows is not null)
+{
+    <ConflictPanel Rows="_conflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyAsync" />
+}
+
+@if (Loading)
+{
+    <p class="muted" role="status">Loading…</p>
+}
+else if (_tab == "venues")
+{
+    @if (CanManage && _venueForm is not null)
+    {
+        <section class="card" aria-labelledby="venue-form-title" data-testid="venue-form">
+            <h2 id="venue-form-title">@(_venueForm.Id is null ? "New venue" : $"Edit {_venueForm.Code}")</h2>
+            <form class="form" @onsubmit="SaveVenueAsync" @onsubmit:preventDefault novalidate>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="v-cemetery">Cemetery</label>
+                        <select id="v-cemetery" @bind="_venueForm.CemeteryId" aria-invalid="@Invalid("cemeteryId")" aria-describedby="@Describe("cemeteryId")" data-testid="venue-cemetery">
+                            <option value="">Choose a cemetery</option>
+                            @foreach (var c in _cemeteries)
+                            {
+                                <option value="@c.Id">@c.Name (@c.TimeZoneId)</option>
+                            }
+                        </select>
+                        <FieldErrors Id="@ErrorId("cemeteryId")" Messages="@(Errors("cemeteryId"))" />
+                    </div>
+                    <div class="field">
+                        <label for="v-code">Code</label>
+                        <input id="v-code" @bind="_venueForm.Code" maxlength="20" autocomplete="off" aria-invalid="@Invalid("code")" aria-describedby="@Describe("code", "v-code-hint")" data-testid="venue-code" />
+                        <span class="field__hint" id="v-code-hint">Upper-case letters, digits and dashes, e.g. RMP-CHAPEL.</span>
+                        <FieldErrors Id="@ErrorId("code")" Messages="@(Errors("code"))" />
+                    </div>
+                    <div class="field">
+                        <label for="v-name">Name</label>
+                        <input id="v-name" @bind="_venueForm.Name" maxlength="120" aria-invalid="@Invalid("name")" aria-describedby="@Describe("name")" data-testid="venue-name" />
+                        <FieldErrors Id="@ErrorId("name")" Messages="@(Errors("name"))" />
+                    </div>
+                    <div class="field">
+                        <label for="v-capacity">Capacity (attendees)</label>
+                        <input id="v-capacity" type="number" min="1" max="5000" inputmode="numeric" @bind="_venueForm.Capacity" aria-invalid="@Invalid("capacity")" aria-describedby="@Describe("capacity")" data-testid="venue-capacity" />
+                        <FieldErrors Id="@ErrorId("capacity")" Messages="@(Errors("capacity"))" />
+                    </div>
+                    <div class="field span-2">
+                        <label for="v-address">Address</label>
+                        <input id="v-address" @bind="_venueForm.Address" maxlength="200" aria-invalid="@Invalid("address")" aria-describedby="@Describe("address", "v-address-hint")" data-testid="venue-address" />
+                        <span class="field__hint" id="v-address-hint">Changing the address marks confirmed coordinates as unverified until they are geocoded again.</span>
+                        <FieldErrors Id="@ErrorId("address")" Messages="@(Errors("address"))" />
+                    </div>
+                    <div class="field">
+                        <label for="v-setup">Setup buffer (minutes)</label>
+                        <input id="v-setup" type="number" min="0" max="240" inputmode="numeric" @bind="_venueForm.Setup" aria-invalid="@Invalid("setupBufferMinutes")" aria-describedby="@Describe("setupBufferMinutes")" data-testid="venue-setup" />
+                        <FieldErrors Id="@ErrorId("setupBufferMinutes")" Messages="@(Errors("setupBufferMinutes"))" />
+                    </div>
+                    <div class="field">
+                        <label for="v-teardown">Teardown buffer (minutes)</label>
+                        <input id="v-teardown" type="number" min="0" max="240" inputmode="numeric" @bind="_venueForm.Teardown" aria-invalid="@Invalid("teardownBufferMinutes")" aria-describedby="@Describe("teardownBufferMinutes")" data-testid="venue-teardown" />
+                        <FieldErrors Id="@ErrorId("teardownBufferMinutes")" Messages="@(Errors("teardownBufferMinutes"))" />
+                    </div>
+                </div>
+
+                <fieldset aria-describedby="@Describe("openingHours", "v-hours-hint")">
+                    <legend>Opening hours (venue-local)</legend>
+                    <p class="field__hint" id="v-hours-hint">Tick the days the venue opens. Bookings, including buffers, must fit inside one day's hours.</p>
+                    <div class="hours">
+                        @foreach (var d in _venueForm.Hours)
+                        {
+                            <div class="hours__row">
+                                <label class="check"><input type="checkbox" @bind="d.Open" data-testid="venue-open-@d.Day" /> @d.Day</label>
+                                <label class="visually-hidden" for="opens-@d.Day">@d.Day opens</label>
+                                <input id="opens-@d.Day" type="time" @bind="d.Opens" disabled="@(!d.Open)" aria-invalid="@Invalid("openingHours")" />
+                                <span aria-hidden="true">to</span>
+                                <label class="visually-hidden" for="closes-@d.Day">@d.Day closes</label>
+                                <input id="closes-@d.Day" type="time" @bind="d.Closes" disabled="@(!d.Open)" aria-invalid="@Invalid("openingHours")" />
+                            </div>
+                        }
+                    </div>
+                    <FieldErrors Id="@ErrorId("openingHours")" Messages="@(Errors("openingHours"))" />
+                </fieldset>
+
+                <fieldset>
+                    <legend>Allowed event categories</legend>
+                    <p class="field__hint">None ticked means every category is accepted.</p>
+                    <div class="checks">
+                        @foreach (var c in _categories)
+                        {
+                            <label class="check"><input type="checkbox" checked="@_venueForm.Categories.Contains(c.Code)" @onchange="e => Toggle(_venueForm.Categories, c.Code, e)" /> @c.Name (@c.Code)</label>
+                        }
+                    </div>
+                </fieldset>
+
+                <label class="check"><input type="checkbox" @bind="_venueForm.Active" data-testid="venue-active" /> Active (inactive venues cannot be booked)</label>
+
+                @if (_venueForm.Id is not null && _venues.FirstOrDefault(v => v.Id == _venueForm.Id) is { } current)
+                {
+                    <p class="muted">Coordinates: @Coordinates(current). <a href="venues/map?venue=@current.Id">Geocode on the Venue Map</a></p>
+                }
+
+                <div class="row">
+                    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="venue-save">Save venue</button>
+                    <button type="button" class="btn" @onclick="CancelForms">Cancel</button>
+                </div>
+            </form>
+        </section>
+    }
+
+    <section class="card card--flush" aria-labelledby="venues-title" data-testid="venues-list">
+        <div class="card__pad row row--between">
+            <h2 id="venues-title">@Ui.Plural(_venues.Count, "venue", "venues")</h2>
+            @if (CanManage)
+            {
+                <button type="button" class="btn" @onclick="NewVenue" data-testid="venue-new">New venue</button>
+            }
+        </div>
+        @if (_venues.Count == 0)
+        {
+            <EmptyState Title="No venues yet"><p>@(CanManage ? "Add the first venue with New venue." : "A System Admin adds venues.")</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Venues with capacity, buffers, hours and status</caption>
+                    <thead><tr><th scope="col">Venue</th><th scope="col">Cemetery</th><th scope="col" class="num">Capacity</th><th scope="col">Buffers</th><th scope="col">Hours</th><th scope="col">Coordinates</th><th scope="col">Status</th>@if (CanManage) { <th scope="col">Actions</th> }</tr></thead>
+                    <tbody>
+                        @foreach (var v in _venues)
+                        {
+                            <tr data-testid="venue-row" data-code="@v.Code">
+                                <td data-label="Venue"><strong>@v.Name</strong><br /><span class="muted mono">@v.Code</span></td>
+                                <td data-label="Cemetery">@v.CemeteryName<br /><span class="muted">@v.TimeZoneId</span></td>
+                                <td data-label="Capacity" class="num">@v.Capacity</td>
+                                <td data-label="Buffers">@v.SetupBufferMinutes / @v.TeardownBufferMinutes min</td>
+                                <td data-label="Hours">@HoursSummary(v.OpeningHours)</td>
+                                <td data-label="Coordinates">@Coordinates(v)</td>
+                                <td data-label="Status">@if (v.IsActive) { <span class="chip chip--good">Active</span> } else { <span class="chip chip--bad">Inactive</span> }</td>
+                                @if (CanManage)
+                                {
+                                    <td data-label="Actions">
+                                        <div class="row">
+                                            <button type="button" class="btn btn--small" @onclick="() => EditVenue(v)" data-testid="venue-edit">Edit</button>
+                                            <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ToggleVenueAsync(v)" data-testid="venue-toggle">@(v.IsActive ? "Deactivate" : "Reactivate")</button>
+                                        </div>
+                                    </td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+else if (_tab == "closures")
+{
+    @if (CanManage)
+    {
+        <section class="card" aria-labelledby="closure-form-title" data-testid="closure-form">
+            <h2 id="closure-form-title">Add a closure</h2>
+            <p class="muted">A closure is a hard block: no reservation may overlap it, and Scheduling Officers cannot override it. Existing reservations that overlap are listed as warnings.</p>
+            <form class="form" @onsubmit="AddClosureAsync" @onsubmit:preventDefault novalidate>
+                <div class="form-grid">
+                    <div class="field span-2">
+                        <label for="b-venue">Venue</label>
+                        <select id="b-venue" @bind="_closure.VenueId" aria-invalid="@Invalid("venueId")" aria-describedby="@Describe("venueId")" data-testid="closure-venue">
+                            <option value="">Choose a venue</option>
+                            @foreach (var v in _venues)
+                            {
+                                <option value="@v.Id">@v.Name (@v.CemeteryName)</option>
+                            }
+                        </select>
+                        <FieldErrors Id="@ErrorId("venueId")" Messages="@(Errors("venueId"))" />
+                    </div>
+                    <div class="field">
+                        <label for="b-start">Starts (venue-local)</label>
+                        <input id="b-start" type="datetime-local" @bind="_closure.Start" aria-invalid="@Invalid("startUtc")" aria-describedby="@Describe("startUtc")" data-testid="closure-start" />
+                        <FieldErrors Id="@ErrorId("startUtc")" Messages="@(Errors("startUtc"))" />
+                    </div>
+                    <div class="field">
+                        <label for="b-end">Ends (venue-local)</label>
+                        <input id="b-end" type="datetime-local" @bind="_closure.End" aria-invalid="@Invalid("endUtc")" aria-describedby="@Describe("endUtc")" data-testid="closure-end" />
+                        <FieldErrors Id="@ErrorId("endUtc")" Messages="@(Errors("endUtc"))" />
+                    </div>
+                    <div class="field span-2">
+                        <label for="b-reason">Reason</label>
+                        <input id="b-reason" @bind="_closure.Reason" maxlength="300" aria-invalid="@Invalid("reason")" aria-describedby="@Describe("reason")" data-testid="closure-reason" />
+                        <FieldErrors Id="@ErrorId("reason")" Messages="@(Errors("reason"))" />
+                    </div>
+                </div>
+                <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="closure-add">Add closure</button>
+            </form>
+            @if (_lastClosure is { AffectedReferences.Count: > 0 } added)
+            {
+                <div class="alert alert--warning" role="alert" data-testid="closure-warning">
+                    <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span><strong>@Ui.Plural(added.AffectedReferences.Count, "reservation overlaps", "reservations overlap") this closure</strong></p>
+                    <p>@string.Join(", ", added.AffectedReferences). Contact the Scheduling Officer to move them.</p>
+                </div>
+            }
+        </section>
+    }
+
+    <section class="card card--flush" aria-labelledby="closures-title" data-testid="closures-list">
+        <div class="card__pad">
+            <h2 id="closures-title">Closure windows</h2>
+            <div class="field narrow">
+                <label for="b-filter">Venue</label>
+                <select id="b-filter" value="@(_closureFilter?.ToString() ?? "")" @onchange="ClosureFilterChanged" data-testid="closure-filter">
+                    <option value="">All venues</option>
+                    @foreach (var v in _venues)
+                    {
+                        <option value="@v.Id">@v.Name</option>
+                    }
+                </select>
+            </div>
+        </div>
+        @{ var closures = _blackouts.Where(b => _closureFilter is null || b.VenueId == _closureFilter).ToList(); }
+        @if (closures.Count == 0)
+        {
+            <EmptyState Title="No closures recorded"><p>@(CanManage ? "Add one above when a venue must not be booked." : "A System Admin records closures.")</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Closure windows, venue-local times</caption>
+                    <thead><tr><th scope="col">Venue</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Reason</th><th scope="col">Overlapping reservations</th><th scope="col">Status</th>@if (CanManage) { <th scope="col">Actions</th> }</tr></thead>
+                    <tbody>
+                        @foreach (var b in closures)
+                        {
+                            <tr data-testid="closure-row">
+                                <td data-label="Venue">@b.VenueName</td>
+                                <td data-label="From">@Ui.Local(b.StartUtc, b.TimeZoneId, "ddd d MMM yyyy, HH:mm")</td>
+                                <td data-label="To">@Ui.Local(b.EndUtc, b.TimeZoneId, "ddd d MMM yyyy, HH:mm")</td>
+                                <td data-label="Reason">@b.Reason</td>
+                                <td data-label="Overlaps">@if (b.AffectedReferences.Count == 0) { <span class="muted">None</span> } else { <span class="chip chip--attention">Warning: @string.Join(", ", b.AffectedReferences)</span> }</td>
+                                <td data-label="Status">@if (b.IsActive) { <span class="chip chip--bad">Closed</span> } else { <span class="chip chip--draft">Lifted</span> }</td>
+                                @if (CanManage)
+                                {
+                                    <td data-label="Actions"><button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ToggleClosureAsync(b, b.Version, !b.IsActive)" data-testid="closure-toggle">@(b.IsActive ? "Lift closure" : "Reinstate")</button></td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+else if (_tab == "inventory")
+{
+    @if (CanManage && _resourceForm is not null)
+    {
+        <section class="card" aria-labelledby="resource-form-title" data-testid="resource-form">
+            <h2 id="resource-form-title">@(_resourceForm.Id is null ? "New stock item" : $"Edit {_resourceForm.Name}")</h2>
+            <form class="form" @onsubmit="SaveResourceAsync" @onsubmit:preventDefault novalidate>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="s-cemetery">Cemetery</label>
+                        <select id="s-cemetery" @bind="_resourceForm.CemeteryId" disabled="@(_resourceForm.Id is not null)" aria-invalid="@Invalid("cemeteryId")" aria-describedby="@Describe("cemeteryId")" data-testid="resource-cemetery">
+                            <option value="">Choose a cemetery</option>
+                            @foreach (var c in _cemeteries)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                        <FieldErrors Id="@ErrorId("cemeteryId")" Messages="@(Errors("cemeteryId"))" />
+                    </div>
+                    <div class="field">
+                        <label for="s-code">Code</label>
+                        <input id="s-code" @bind="_resourceForm.Code" maxlength="20" disabled="@(_resourceForm.Id is not null)" aria-invalid="@Invalid("code")" aria-describedby="@Describe("code")" data-testid="resource-code" />
+                        <FieldErrors Id="@ErrorId("code")" Messages="@(Errors("code"))" />
+                    </div>
+                    <div class="field">
+                        <label for="s-name">Name</label>
+                        <input id="s-name" @bind="_resourceForm.Name" maxlength="80" aria-invalid="@Invalid("name")" aria-describedby="@Describe("name")" data-testid="resource-name" />
+                        <FieldErrors Id="@ErrorId("name")" Messages="@(Errors("name"))" />
+                    </div>
+                    <div class="field">
+                        <label for="s-unit">Unit</label>
+                        <input id="s-unit" @bind="_resourceForm.Unit" maxlength="20" aria-invalid="@Invalid("unit")" aria-describedby="@Describe("unit")" data-testid="resource-unit" />
+                        <FieldErrors Id="@ErrorId("unit")" Messages="@(Errors("unit"))" />
+                    </div>
+                    <div class="field">
+                        <label for="s-total">Total quantity</label>
+                        <input id="s-total" type="number" min="0" max="10000" inputmode="numeric" @bind="_resourceForm.Total" aria-invalid="@Invalid("totalQuantity")" aria-describedby="@Describe("totalQuantity")" data-testid="resource-total" />
+                        <FieldErrors Id="@ErrorId("totalQuantity")" Messages="@(Errors("totalQuantity"))" />
+                    </div>
+                    <label class="check"><input type="checkbox" @bind="_resourceForm.Active" /> Active (inactive stock cannot be allocated)</label>
+                </div>
+                <div class="row">
+                    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="resource-save">Save stock</button>
+                    <button type="button" class="btn" @onclick="CancelForms">Cancel</button>
+                </div>
+            </form>
+        </section>
+    }
+    <section class="card card--flush" aria-labelledby="stock-title" data-testid="resources-list">
+        <div class="card__pad row row--between">
+            <h2 id="stock-title">Stock per cemetery</h2>
+            @if (CanManage)
+            {
+                <button type="button" class="btn" @onclick="NewResource" data-testid="resource-new">New stock item</button>
+            }
+        </div>
+        @if (_resources.Count == 0)
+        {
+            <EmptyState Title="No stock recorded" />
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Resource inventory per cemetery</caption>
+                    <thead><tr><th scope="col">Cemetery</th><th scope="col">Resource</th><th scope="col">Unit</th><th scope="col" class="num">Total</th><th scope="col">Status</th>@if (CanManage) { <th scope="col">Actions</th> }</tr></thead>
+                    <tbody>
+                        @foreach (var r in _resources)
+                        {
+                            <tr data-testid="resource-row" data-code="@r.Code">
+                                <td data-label="Cemetery">@r.CemeteryName</td>
+                                <td data-label="Resource">@r.Name <span class="muted mono">@r.Code</span></td>
+                                <td data-label="Unit">@r.Unit</td>
+                                <td data-label="Total" class="num">@r.TotalQuantity</td>
+                                <td data-label="Status">@if (r.IsActive) { <span class="chip chip--good">Active</span> } else { <span class="chip chip--bad">Inactive</span> }</td>
+                                @if (CanManage)
+                                {
+                                    <td data-label="Actions"><button type="button" class="btn btn--small" @onclick="() => EditResource(r)" data-testid="resource-edit">Edit</button></td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+else
+{
+    @if (CanManage && _categoryForm is not null)
+    {
+        <section class="card" aria-labelledby="category-form-title" data-testid="category-form">
+            <h2 id="category-form-title">@(_categoryForm.Id is null ? "New event category" : $"Edit {_categoryForm.Code}")</h2>
+            <form class="form" @onsubmit="SaveCategoryAsync" @onsubmit:preventDefault novalidate>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="k-code">Code</label>
+                        <input id="k-code" @bind="_categoryForm.Code" maxlength="20" disabled="@(_categoryForm.Id is not null)" aria-invalid="@Invalid("code")" aria-describedby="@Describe("code")" data-testid="category-code" />
+                        <FieldErrors Id="@ErrorId("code")" Messages="@(Errors("code"))" />
+                    </div>
+                    <div class="field">
+                        <label for="k-name">Name</label>
+                        <input id="k-name" @bind="_categoryForm.Name" maxlength="80" aria-invalid="@Invalid("name")" aria-describedby="@Describe("name")" data-testid="category-name" />
+                        <FieldErrors Id="@ErrorId("name")" Messages="@(Errors("name"))" />
+                    </div>
+                    <div class="field span-2">
+                        <label for="k-description">Description</label>
+                        <textarea id="k-description" @bind="_categoryForm.Description" maxlength="400" aria-invalid="@Invalid("description")" aria-describedby="@Describe("description")"></textarea>
+                        <FieldErrors Id="@ErrorId("description")" Messages="@(Errors("description"))" />
+                    </div>
+                    <fieldset class="span-2">
+                        <legend>Required documents</legend>
+                        <div class="checks">
+                            @foreach (var d in Enum.GetValues<DocumentType>())
+                            {
+                                <label class="check"><input type="checkbox" checked="@_categoryForm.Documents.Contains(d)" @onchange="e => ToggleDoc(d, e)" /> @DocName(d)</label>
+                            }
+                        </div>
+                    </fieldset>
+                    <div class="field span-2">
+                        <label for="k-checklist">Review checklist (one item per line)</label>
+                        <textarea id="k-checklist" @bind="_categoryForm.Checklist" rows="5" aria-invalid="@Invalid("checklist")" aria-describedby="@Describe("checklist")" data-testid="category-checklist"></textarea>
+                        <FieldErrors Id="@ErrorId("checklist")" Messages="@(Errors("checklist"))" />
+                    </div>
+                    <label class="check"><input type="checkbox" @bind="_categoryForm.Active" /> Active (inactive categories cannot be chosen for new applications)</label>
+                </div>
+                <div class="row">
+                    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="category-save">Save category</button>
+                    <button type="button" class="btn" @onclick="CancelForms">Cancel</button>
+                </div>
+            </form>
+        </section>
+    }
+    <section class="card card--flush" aria-labelledby="categories-title" data-testid="categories-list">
+        <div class="card__pad row row--between">
+            <h2 id="categories-title">Event categories</h2>
+            @if (CanManage)
+            {
+                <button type="button" class="btn" @onclick="NewCategory" data-testid="category-new">New category</button>
+            }
+        </div>
+        @if (_categories.Count == 0)
+        {
+            <EmptyState Title="No categories" />
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Event categories with required documents and review checklist</caption>
+                    <thead><tr><th scope="col">Category</th><th scope="col">Required documents</th><th scope="col">Review checklist</th><th scope="col">Status</th>@if (CanManage) { <th scope="col">Actions</th> }</tr></thead>
+                    <tbody>
+                        @foreach (var c in _categories)
+                        {
+                            <tr data-testid="category-row" data-code="@c.Code">
+                                <td data-label="Category"><strong>@c.Name</strong> <span class="muted mono">@c.Code</span><br /><span class="muted">@c.Description</span></td>
+                                <td data-label="Documents">@(c.RequiredDocuments.Count == 0 ? "None" : string.Join(", ", c.RequiredDocuments.Select(DocName)))</td>
+                                <td data-label="Checklist">@Ui.Plural(c.ReviewChecklist.Count, "item", "items")</td>
+                                <td data-label="Status">@if (c.IsActive) { <span class="chip chip--good">Active</span> } else { <span class="chip chip--bad">Inactive</span> }</td>
+                                @if (CanManage)
+                                {
+                                    <td data-label="Actions"><button type="button" class="btn btn--small" @onclick="() => EditCategory(c)" data-testid="category-edit">Edit</button></td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+@code {
+    private static readonly (string, string)[] Tabs = [("venues", "Venues"), ("closures", "Closures"), ("inventory", "Inventory"), ("categories", "Event categories")];
+    private static readonly DayOfWeek[] Week = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+
+    [SupplyParameterFromQuery(Name = "tab")] public string? TabQuery { get; set; }
+
+    private sealed class DayForm
+    {
+        public DayOfWeek Day { get; init; }
+        public bool Open { get; set; }
+        public TimeOnly? Opens { get; set; } = new(8, 0);
+        public TimeOnly? Closes { get; set; } = new(17, 0);
+    }
+
+    private sealed class VenueForm
+    {
+        public Guid? Id { get; init; }
+        public uint? Version { get; set; }
+        public Guid? CemeteryId { get; set; }
+        public string? Code { get; set; }
+        public string? Name { get; set; }
+        public string? Address { get; set; }
+        public int? Capacity { get; set; }
+        public int? Setup { get; set; } = 30;
+        public int? Teardown { get; set; } = 30;
+        public bool Active { get; set; } = true;
+        public List<DayForm> Hours { get; init; } = [];
+        public HashSet<string> Categories { get; init; } = [];
+    }
+
+    private sealed class ClosureForm
+    {
+        public Guid? VenueId { get; set; }
+        public DateTime? Start { get; set; }
+        public DateTime? End { get; set; }
+        public string? Reason { get; set; }
+    }
+
+    private sealed class ResourceForm
+    {
+        public Guid? Id { get; init; }
+        public uint? Version { get; set; }
+        public Guid? CemeteryId { get; set; }
+        public string? Code { get; set; }
+        public string? Name { get; set; }
+        public string? Unit { get; set; } = "each";
+        public int? Total { get; set; }
+        public bool Active { get; set; } = true;
+    }
+
+    private sealed class CategoryForm
+    {
+        public Guid? Id { get; init; }
+        public uint? Version { get; set; }
+        public string? Code { get; set; }
+        public string? Name { get; set; }
+        public string? Description { get; set; }
+        public HashSet<DocumentType> Documents { get; init; } = [];
+        public string? Checklist { get; set; }
+        public bool Active { get; set; } = true;
+    }
+
+    private IReadOnlyList<CemeteryRow> _cemeteries = [];
+    private IReadOnlyList<VenueRow> _venues = [];
+    private IReadOnlyList<BlackoutRow> _blackouts = [];
+    private IReadOnlyList<ResourceRow> _resources = [];
+    private IReadOnlyList<CategoryRow> _categories = [];
+    private string _tab = "venues";
+    private VenueForm? _venueForm;
+    private ResourceForm? _resourceForm;
+    private CategoryForm? _categoryForm;
+    private ClosureForm _closure = new();
+    private BlackoutRow? _lastClosure;
+    private Guid? _closureFilter;
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+    private Func<Task>? _reapply;
+    private Func<Task>? _reload;
+
+    private bool CanManage => Me?.Can(Cap.ManageVenues) == true;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _tab = Tabs.Any(t => t.Item1 == TabQuery) ? TabQuery! : "venues";
+        _conflictRows = null;
+        if (_venues.Count == 0 && _cemeteries.Count == 0) await LoadAllAsync();
+    }
+
+    private async Task LoadAllAsync()
+    {
+        Problem = null;
+        await LoadAsync(RefreshAsync);
+    }
+
+    private async Task RefreshAsync(Actor me)
+    {
+        _cemeteries = await Admin.CemeteriesAsync(me);
+        _venues = await Admin.VenuesAsync(me);
+        _blackouts = await Admin.BlackoutsAsync(me, null);
+        _resources = await Admin.ResourcesAsync(me);
+        _categories = await Admin.CategoriesAsync(me);
+    }
+
+    private string TabHref(string key) => Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["tab"] = key == "venues" ? null : key });
+
+    private void CancelForms()
+    {
+        _venueForm = null;
+        _resourceForm = null;
+        _categoryForm = null;
+        _conflictRows = null;
+        Problem = null;
+    }
+
+    private static void Toggle(HashSet<string> set, string value, ChangeEventArgs e)
+    {
+        if (e.Value is true) set.Add(value);
+        else set.Remove(value);
+    }
+
+    // ------------------------------------------------------------------ venues
+
+    private void NewVenue()
+    {
+        CancelForms();
+        _venueForm = new VenueForm
+        {
+            CemeteryId = _cemeteries.FirstOrDefault()?.Id,
+            Hours = Week.Select(d => new DayForm { Day = d, Open = d is not (DayOfWeek.Saturday or DayOfWeek.Sunday) }).ToList(),
+        };
+    }
+
+    private void EditVenue(VenueRow v)
+    {
+        CancelForms();
+        _venueForm = FormFor(v);
+    }
+
+    private static VenueForm FormFor(VenueRow v) => new()
+    {
+        Id = v.Id, Version = v.Version, CemeteryId = v.CemeteryId, Code = v.Code, Name = v.Name, Address = v.Address, Capacity = v.Capacity,
+        Setup = v.SetupBufferMinutes, Teardown = v.TeardownBufferMinutes, Active = v.IsActive,
+        Hours = Week.Select(d => v.OpeningHours.FirstOrDefault(h => h.Day == d) is { } h
+            ? new DayForm { Day = d, Open = true, Opens = h.Opens, Closes = h.Closes }
+            : new DayForm { Day = d, Open = false }).ToList(),
+        Categories = [.. v.AllowedCategoryCodes],
+    };
+
+    private async Task SaveVenueAsync()
+    {
+        var f = _venueForm!;
+        _conflictRows = null;
+        var errors = new Dictionary<string, string[]>();
+        if (f.CemeteryId is null) errors["cemeteryId"] = ["Choose a cemetery."];
+        if (string.IsNullOrWhiteSpace(f.Code)) errors["code"] = ["Code is required."];
+        if (string.IsNullOrWhiteSpace(f.Name)) errors["name"] = ["Name is required."];
+        if (string.IsNullOrWhiteSpace(f.Address)) errors["address"] = ["Address is required."];
+        if (f.Capacity is null) errors["capacity"] = ["Enter the capacity."];
+        if (f.Setup is null) errors["setupBufferMinutes"] = ["Enter the setup buffer (0 for none)."];
+        if (f.Teardown is null) errors["teardownBufferMinutes"] = ["Enter the teardown buffer (0 for none)."];
+        if (f.Hours.Any(h => h.Open && (h.Opens is null || h.Closes is null))) errors["openingHours"] = ["Give opening and closing times for every open day."];
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        var input = new VenueInput(f.CemeteryId!.Value, f.Code, f.Name, f.Address, f.Capacity!.Value, f.Setup!.Value, f.Teardown!.Value,
+            f.Hours.Where(h => h.Open).Select(h => new OpeningHours { Day = h.Day, Opens = h.Opens!.Value, Closes = h.Closes!.Value }).ToList(), f.Categories.ToList(), f.Active);
+        await SendVenueAsync(f, input, $"Venue {f.Code?.Trim()} saved.");
+    }
+
+    private async Task SendVenueAsync(VenueForm f, VenueInput input, string success)
+    {
+        var ok = await RunAsync(me => Admin.SaveVenueAsync(me, f.Id, f.Version, input), success);
+        if (ok)
+        {
+            _venueForm = null;
+            await RefreshAsync(await GetActorAsync());
+        }
+        else if (Problem?.StatusCode == 409 && f.Id is { } id)
+        {
+            await ConflictAsync(async () =>
+            {
+                var saved = _venues.First(v => v.Id == id);
+                return
+                [
+                    new("Name", saved.Name, input.Name), new("Address", saved.Address, input.Address),
+                    new("Capacity", saved.Capacity.ToString(Ui.Culture), input.Capacity.ToString(Ui.Culture)),
+                    new("Buffers", $"{saved.SetupBufferMinutes}/{saved.TeardownBufferMinutes}", $"{input.SetupBufferMinutes}/{input.TeardownBufferMinutes}"),
+                    new("Opening hours", HoursSummary(saved.OpeningHours), HoursSummary(input.OpeningHours)),
+                    new("Active", saved.IsActive ? "Yes" : "No", input.IsActive ? "Yes" : "No"),
+                ];
+            },
+            reload: () => { _venueForm = _venues.FirstOrDefault(v => v.Id == id) is { } s ? FormFor(s) : null; return Task.CompletedTask; },
+            reapply: () => { f.Version = _venues.First(v => v.Id == id).Version; return SendVenueAsync(f, input, success); });
+        }
+    }
+
+    private async Task ToggleVenueAsync(VenueRow v)
+    {
+        CancelForms();
+        var input = new VenueInput(v.CemeteryId, v.Code, v.Name, v.Address, v.Capacity, v.SetupBufferMinutes, v.TeardownBufferMinutes, v.OpeningHours, v.AllowedCategoryCodes, !v.IsActive);
+        await SendVenueAsync(new VenueForm { Id = v.Id, Version = v.Version, Code = v.Code }, input, $"Venue {v.Code} {(v.IsActive ? "deactivated; it can no longer be booked" : "reactivated")}.");
+    }
+
+    // ------------------------------------------------------------------ closures
+
+    private void ClosureFilterChanged(ChangeEventArgs e) => _closureFilter = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null;
+
+    private async Task AddClosureAsync()
+    {
+        _conflictRows = null;
+        _lastClosure = null;
+        var c = _closure;
+        var errors = new Dictionary<string, string[]>();
+        var venue = _venues.FirstOrDefault(v => v.Id == c.VenueId);
+        if (venue is null) errors["venueId"] = ["Choose a venue."];
+        if (c.Start is null) errors["startUtc"] = ["Enter when the closure starts."];
+        if (c.End is null) errors["endUtc"] = ["Enter when the closure ends."];
+        else if (c.Start is not null && c.End <= c.Start) errors["endUtc"] = ["The closure must end after it starts."];
+        if (string.IsNullOrWhiteSpace(c.Reason)) errors["reason"] = ["Reason is required."];
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        var start = CaseService.ToUtc(DateOnly.FromDateTime(c.Start!.Value), TimeOnly.FromDateTime(c.Start.Value), venue!.TimeZoneId);
+        var end = CaseService.ToUtc(DateOnly.FromDateTime(c.End!.Value), TimeOnly.FromDateTime(c.End.Value), venue.TimeZoneId);
+        BlackoutRow? added = null;
+        var ok = await RunAsync(async me => added = await Admin.AddBlackoutAsync(me, new BlackoutInput(venue.Id, start, end, c.Reason)),
+            $"Closure added at {venue.Name}.");
+        if (!ok) return;
+        _lastClosure = added;
+        _closure = new ClosureForm { VenueId = venue.Id };
+        await RefreshAsync(await GetActorAsync());
+    }
+
+    private async Task ToggleClosureAsync(BlackoutRow b, uint version, bool active)
+    {
+        _conflictRows = null;
+        var ok = await RunAsync(me => Admin.SetBlackoutActiveAsync(me, b.Id, version, active),
+            active ? $"Closure at {b.VenueName} reinstated." : $"Closure at {b.VenueName} lifted; the venue can be booked in that window again.");
+        if (ok) await RefreshAsync(await GetActorAsync());
+        else if (Problem?.StatusCode == 409)
+        {
+            await ConflictAsync(() =>
+            {
+                var saved = _blackouts.First(x => x.Id == b.Id);
+                return Task.FromResult<IReadOnlyList<ConflictPanel.Row>>(
+                [
+                    new("Status", saved.IsActive ? "Closed" : "Lifted", active ? "Closed" : "Lifted"),
+                    new("Reason", saved.Reason, b.Reason),
+                ]);
+            }, reload: () => Task.CompletedTask, reapply: () => ToggleClosureAsync(b, _blackouts.First(x => x.Id == b.Id).Version, active));
+        }
+    }
+
+    // ------------------------------------------------------------------ inventory
+
+    private void NewResource()
+    {
+        CancelForms();
+        _resourceForm = new ResourceForm { CemeteryId = _cemeteries.FirstOrDefault()?.Id };
+    }
+
+    private void EditResource(ResourceRow r)
+    {
+        CancelForms();
+        _resourceForm = ResourceFormFor(r);
+    }
+
+    private static ResourceForm ResourceFormFor(ResourceRow r) => new()
+    {
+        Id = r.Id, Version = r.Version, CemeteryId = r.CemeteryId, Code = r.Code, Name = r.Name, Unit = r.Unit, Total = r.TotalQuantity, Active = r.IsActive,
+    };
+
+    private async Task SaveResourceAsync()
+    {
+        var f = _resourceForm!;
+        _conflictRows = null;
+        var errors = new Dictionary<string, string[]>();
+        if (f.CemeteryId is null) errors["cemeteryId"] = ["Choose a cemetery."];
+        if (string.IsNullOrWhiteSpace(f.Code)) errors["code"] = ["Code is required."];
+        if (string.IsNullOrWhiteSpace(f.Name)) errors["name"] = ["Name is required."];
+        if (string.IsNullOrWhiteSpace(f.Unit)) errors["unit"] = ["Unit is required."];
+        if (f.Total is null) errors["totalQuantity"] = ["Enter the total quantity."];
+        else if (f.Total < 0) errors["totalQuantity"] = ["Quantity cannot be negative."];
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        await SendResourceAsync(f);
+    }
+
+    private async Task SendResourceAsync(ResourceForm f)
+    {
+        var ok = await RunAsync(me => Admin.SaveResourceAsync(me, f.Id, f.Version, f.CemeteryId!.Value, f.Code, f.Name, f.Unit, f.Total!.Value, f.Active), $"{f.Name?.Trim()} saved.");
+        if (ok)
+        {
+            _resourceForm = null;
+            await RefreshAsync(await GetActorAsync());
+        }
+        else if (Problem?.StatusCode == 409 && f.Id is { } id)
+        {
+            await ConflictAsync(() =>
+            {
+                var saved = _resources.First(r => r.Id == id);
+                return Task.FromResult<IReadOnlyList<ConflictPanel.Row>>(
+                [
+                    new("Name", saved.Name, f.Name), new("Unit", saved.Unit, f.Unit),
+                    new("Total", saved.TotalQuantity.ToString(Ui.Culture), f.Total?.ToString(Ui.Culture)), new("Active", saved.IsActive ? "Yes" : "No", f.Active ? "Yes" : "No"),
+                ]);
+            },
+            reload: () => { _resourceForm = ResourceFormFor(_resources.First(r => r.Id == id)); return Task.CompletedTask; },
+            reapply: () => { f.Version = _resources.First(r => r.Id == id).Version; return SendResourceAsync(f); });
+        }
+    }
+
+    // ------------------------------------------------------------------ categories
+
+    private static string DocName(DocumentType d) => d switch
+    {
+        DocumentType.ProofOfAffiliation => "Proof of affiliation",
+        DocumentType.EventPlan => "Event plan",
+        DocumentType.InsuranceCertificate => "Insurance certificate",
+        DocumentType.SitePlan => "Site plan",
+        _ => "Other document",
+    };
+
+    private void ToggleDoc(DocumentType d, ChangeEventArgs e)
+    {
+        if (e.Value is true) _categoryForm!.Documents.Add(d);
+        else _categoryForm!.Documents.Remove(d);
+    }
+
+    private void NewCategory()
+    {
+        CancelForms();
+        _categoryForm = new CategoryForm();
+    }
+
+    private void EditCategory(CategoryRow c)
+    {
+        CancelForms();
+        _categoryForm = CategoryFormFor(c);
+    }
+
+    private static CategoryForm CategoryFormFor(CategoryRow c) => new()
+    {
+        Id = c.Id, Version = c.Version, Code = c.Code, Name = c.Name, Description = c.Description, Documents = [.. c.RequiredDocuments],
+        Checklist = string.Join('\n', c.ReviewChecklist), Active = c.IsActive,
+    };
+
+    private async Task SaveCategoryAsync()
+    {
+        var f = _categoryForm!;
+        _conflictRows = null;
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(f.Code)) errors["code"] = ["Code is required."];
+        if (string.IsNullOrWhiteSpace(f.Name)) errors["name"] = ["Name is required."];
+        if (ChecklistItems(f).Count == 0) errors["checklist"] = ["Give at least one review checklist item."];
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        await SendCategoryAsync(f);
+    }
+
+    private static List<string> ChecklistItems(CategoryForm f) =>
+        (f.Checklist ?? "").Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+
+    private async Task SendCategoryAsync(CategoryForm f)
+    {
+        var ok = await RunAsync(me => Admin.SaveCategoryAsync(me, f.Id, f.Version, f.Code, f.Name, f.Description, f.Documents.ToList(), ChecklistItems(f), f.Active),
+            $"Category {f.Code?.Trim().ToUpperInvariant()} saved.");
+        if (ok)
+        {
+            _categoryForm = null;
+            await RefreshAsync(await GetActorAsync());
+        }
+        else if (Problem?.StatusCode == 409 && f.Id is { } id)
+        {
+            await ConflictAsync(() =>
+            {
+                var saved = _categories.First(c => c.Id == id);
+                return Task.FromResult<IReadOnlyList<ConflictPanel.Row>>(
+                [
+                    new("Name", saved.Name, f.Name), new("Description", saved.Description, f.Description),
+                    new("Required documents", string.Join(", ", saved.RequiredDocuments.Select(DocName)), string.Join(", ", f.Documents.Select(DocName))),
+                    new("Checklist", string.Join("; ", saved.ReviewChecklist), string.Join("; ", ChecklistItems(f))),
+                    new("Active", saved.IsActive ? "Yes" : "No", f.Active ? "Yes" : "No"),
+                ]);
+            },
+            reload: () => { _categoryForm = CategoryFormFor(_categories.First(c => c.Id == id)); return Task.CompletedTask; },
+            reapply: () => { f.Version = _categories.First(c => c.Id == id).Version; return SendCategoryAsync(f); });
+        }
+    }
+
+    // ------------------------------------------------------------------ 409 handling
+
+    private async Task ConflictAsync(Func<Task<IReadOnlyList<ConflictPanel.Row>>> rows, Func<Task> reload, Func<Task> reapply)
+    {
+        var problem = Problem;
+        await RefreshAsync(await GetActorAsync());
+        Problem = problem;
+        _conflictRows = await rows();
+        _reload = reload;
+        _reapply = reapply;
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        _conflictRows = null;
+        Problem = null;
+        await RefreshAsync(await GetActorAsync());
+        if (_reload is not null) await _reload();
+        Announcement = "Reloaded the saved version.";
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflictRows = null;
+        if (_reapply is not null) await _reapply();
+    }
+
+    // ------------------------------------------------------------------ formatting
+
+    private static string HoursSummary(IReadOnlyList<OpeningHours> hours)
+    {
+        if (hours.Count == 0) return "Closed every day";
+        return string.Join("; ", hours.OrderBy(h => ((int)h.Day + 6) % 7)
+            .GroupBy(h => (h.Opens, h.Closes))
+            .Select(g => $"{string.Join(", ", g.Select(h => h.Day.ToString()[..3]))} {g.Key.Opens.ToString("HH:mm", Ui.Culture)}–{g.Key.Closes.ToString("HH:mm", Ui.Culture)}"));
+    }
+
+    private static string Coordinates(VenueRow v) => v.Latitude is { } lat && v.Longitude is { } lon
+        ? $"{lat.ToString("0.0000", Ui.Culture)}, {lon.ToString("0.0000", Ui.Culture)} ({(v.CoordinatesVerified ? "verified" : "unverified")})"
+        : "Not geocoded (unverified)";
+}

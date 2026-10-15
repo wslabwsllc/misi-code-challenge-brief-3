@@ -1,0 +1,33 @@
+# Local secrets and generated credentials (the documented demo password is the only exception and lives in README/compose.yml)
+.data/
+.secrets/
+*.pfx
+*.key
+.env
+.env.*
+appsettings.*.local.json
+
+# Runtime data
+uploads/
+storage/
+logs/
+*.log
+
+# .NET build output and IDE state
+bin/
+obj/
+TestResults/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+
+# Playwright artifacts (screenshots for docs are committed under docs/screenshots)
+playwright-report/
+test-results/
+.playwright/
+
+# OS files
+.DS_Store
+Thumbs.db

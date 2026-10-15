@@ -1,0 +1,400 @@
+@page "/notifications"
+@attribute [Authorize(Policy = Cap.ViewNotifications)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject NotificationService NotificationSvc
+
+<PageTitle>Notification Center · Memorial Event Operations</PageTitle>
+<PageHeader Title="Notification Center" Lead="@LeadText">
+    <Actions>
+        @if (CanManage)
+        {
+            <a class="btn" href="/integrations/messaging">Messaging Delivery Monitor</a>
+        }
+    </Actions>
+</PageHeader>
+
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" />
+@if (RendererInfo.IsInteractive)
+{
+    <span hidden data-testid="interactive"></span>
+}
+
+@if (_counts is not null)
+{
+    <nav class="grid-4 status-tiles" aria-label="Messages by status" data-testid="status-tiles">
+        @foreach (var (status, count) in _counts)
+        {
+            <a class="kpi @TileCss(status) @(StatusFilter == status ? "is-current" : null)" href="@Link(status, Search, 1, null)" aria-current="@(StatusFilter == status ? "true" : null)" data-testid="tile-@status">
+                <span class="kpi__value">@count.ToString("N0", Ui.Culture)</span>
+                <span class="kpi__label">@status</span>
+            </a>
+        }
+    </nav>
+}
+
+<form class="filters" @onsubmit="ApplyFilters" @onsubmit:preventDefault novalidate data-testid="notification-filters">
+    <div class="field">
+        <label for="n-status">Status</label>
+        <select id="n-status" @bind="_fStatus" data-testid="filter-status">
+            <option value="">Any status</option>
+            @foreach (var s in Enum.GetValues<NotificationStatus>())
+            {
+                <option value="@s">@s</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="n-search">Search</label>
+        <input id="n-search" type="search" @bind="_fSearch" maxlength="100" placeholder="APP reference, subject, template or correlation ID" data-testid="filter-search" />
+    </div>
+    <div class="row">
+        <button type="submit" class="btn btn--primary" data-testid="filter-apply">Filter</button>
+        <a class="btn" href="/notifications">Clear</a>
+    </div>
+</form>
+
+@if (Loading && _rows is null)
+{
+    <p role="status">Loading the outbox…</p>
+}
+else if (_rows is not null)
+{
+    <h2 id="outbox-title">Outbox</h2>
+    @if (_rows.Count == 0)
+    {
+        <EmptyState Title="No messages match">
+            <p>@(StatusFilter is not null || !string.IsNullOrEmpty(Search) ? "Change or clear the filters." : "Messages appear here when a case changes state or a manual message is sent.")</p>
+        </EmptyState>
+    }
+    else
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" aria-labelledby="outbox-title" data-testid="outbox-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Created</th><th scope="col">Status</th><th scope="col">Message</th><th scope="col">Recipient</th>
+                            <th scope="col">Case</th><th scope="col" class="num">Attempts</th><th scope="col">Last error</th><th scope="col"><span class="visually-hidden">Open</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var n in _rows)
+                        {
+                            <tr data-testid="outbox-row" data-status="@n.Status" class="@(SelectedId == n.Id ? "is-selected" : null)">
+                                <td data-label="Created">@Ui.Utc(n.CreatedAt)</td>
+                                <td data-label="Status"><span class="chip @StatusCss(n.Status)">@n.Status</span></td>
+                                <td data-label="Message"><strong>@n.Subject</strong><br /><span class="muted">@n.TemplateCode · @n.Channel@(n.Manual ? " · manual" : "")</span></td>
+                                <td data-label="Recipient" class="wrap">@n.Recipient</td>
+                                <td data-label="Case">@(n.Reference ?? "—")</td>
+                                <td data-label="Attempts" class="num">@n.Attempts</td>
+                                <td data-label="Last error" class="wrap">@(n.LastError ?? "—")</td>
+                                <td data-label="Open"><a class="btn btn--small" href="@Link(StatusFilter, Search, Page, n.Id)" data-testid="outbox-open">Details<span class="visually-hidden"> of @n.Subject</span></a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="Page" Total="_total" OnPage="p => Nav.NavigateTo(Link(StatusFilter, Search, p, SelectedId))" />
+        </div>
+    }
+}
+
+@if (_detail is not null)
+{
+    var d = _detail.Row;
+    <section class="card notification-detail" aria-labelledby="detail-title" data-testid="notification-detail" data-status="@d.Status">
+        <div class="row row--between">
+            <h2 id="detail-title" tabindex="-1">@d.Subject</h2>
+            <span class="chip @StatusCss(d.Status)" data-testid="detail-status">@d.Status</span>
+        </div>
+        @if (_conflict is not null)
+        {
+            <ConflictPanel Rows="_conflict" OnReload="ReloadAsync" OnReapply="ConfirmRetryAsync" />
+        }
+        <div class="split">
+            <div class="stack">
+                <dl class="dl">
+                    <dt>Recipient</dt><dd class="wrap">@d.Recipient (@d.Channel)</dd>
+                    <dt>Template</dt><dd>@d.TemplateCode@(d.Manual ? " (manual)" : "")</dd>
+                    <dt>Case</dt><dd>@(d.Reference ?? "—")</dd>
+                    <dt>Attempts</dt><dd>@d.Attempts</dd>
+                    <dt>Gateway message</dt><dd class="wrap">@(d.GatewayMessageId ?? "Not accepted yet")</dd>
+                    <dt>Correlation ID</dt><dd><code class="wrap">@d.CorrelationId</code></dd>
+                    @if (d.LastError is not null)
+                    {
+                        <dt>Last error</dt><dd class="wrap">@d.LastError</dd>
+                    }
+                </dl>
+                <h3>Message</h3>
+                <pre class="message-body" data-testid="detail-body">@_detail.Body</pre>
+            </div>
+            <div class="stack">
+                @if (d.Status == NotificationStatus.Failed && CanManage)
+                {
+                    <div class="action-box" data-testid="retry-box">
+                        <h3>Retry</h3>
+                        @if (!_confirmRetry)
+                        {
+                            <p>Queue this failed message again. If the gateway had already accepted it, the retry uses a new idempotency key so it is a deliberate new send.</p>
+                            <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="() => _confirmRetry = true" data-testid="retry">Retry failed message</button>
+                        }
+                        else
+                        {
+                            <p role="alert"><strong>Send this message again to @d.Recipient?</strong></p>
+                            <div class="row">
+                                <button type="button" class="btn btn--primary" disabled="@Busy" @onclick="ConfirmRetryAsync" data-testid="retry-confirm">Yes, retry</button>
+                                <button type="button" class="btn" @onclick="() => _confirmRetry = false">Cancel</button>
+                            </div>
+                        }
+                    </div>
+                }
+                <h3>Status history</h3>
+                <ul class="timeline" data-testid="detail-history">
+                    @foreach (var h in _detail.History)
+                    {
+                        <li>
+                            <div>@(h.From is { } from ? $"{from} → " : "")<strong>@h.To</strong> <span class="muted">(@h.Source)</span></div>
+                            <div class="timeline__meta">@Ui.Utc(h.At) · @h.Detail</div>
+                        </li>
+                    }
+                </ul>
+                <h3>Webhook receipts</h3>
+                @if (_detail.Receipts.Count == 0)
+                {
+                    <p class="muted">No delivery callbacks received for this message.</p>
+                }
+                else
+                {
+                    <ul class="timeline" data-testid="detail-receipts">
+                        @foreach (var r in _detail.Receipts)
+                        {
+                            <li><div>@r.ReportedStatus · <strong>@r.Outcome</strong></div><div class="timeline__meta">@Ui.Utc(r.ReceivedAt) · @r.Reason · <code>@r.EventId</code></div></li>
+                        }
+                    </ul>
+                }
+                <h3>Gateway attempts</h3>
+                @if (_detail.Attempts.Count == 0)
+                {
+                    <p class="muted">No gateway calls recorded yet.</p>
+                }
+                else
+                {
+                    <ul class="timeline">
+                        @foreach (var a in _detail.Attempts)
+                        {
+                            <li><div>@a.Method @a.Operation · <strong>@a.Outcome</strong>@(a.StatusCode is { } sc ? $" (HTTP {sc})" : "")</div><div class="timeline__meta">@Ui.Utc(a.At) · attempt @a.AttemptNumber · @a.DurationMs ms@(a.Error is null ? "" : $" · {a.Error}")</div></li>
+                        }
+                    </ul>
+                }
+                <h3>Audit trail</h3>
+                @if (_detail.Audit.Count == 0)
+                {
+                    <p class="muted">No manual actions on this message.</p>
+                }
+                else
+                {
+                    <ul class="timeline" data-testid="detail-audit">
+                        @foreach (var a in _detail.Audit)
+                        {
+                            <li><div>@a.Summary</div><div class="timeline__meta">@a.ActorName · @Ui.Utc(a.At)</div></li>
+                        }
+                    </ul>
+                }
+            </div>
+        </div>
+    </section>
+}
+
+@if (CanManage)
+{
+    <section class="card" aria-labelledby="manual-title" data-testid="manual-form">
+        <h2 id="manual-title">Send a manual notification</h2>
+        <form class="form" @onsubmit="SendManualAsync" @onsubmit:preventDefault novalidate>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="manual-reference">Case reference</label>
+                    <input id="manual-reference" type="text" @bind="_manualReference" maxlength="40" required placeholder="APP-2026-00001" autocapitalize="characters"
+                           aria-invalid="@Invalid("reference")" aria-describedby="@Desc("reference", "manual-reference", "manual-reference-hint")" data-testid="manual-reference" />
+                    <span class="field__hint" id="manual-reference-hint">The message goes to the applicant contact of that case.</span>
+                    <FieldError Errors="@Problem?.For("reference")" Id="manual-reference-error" />
+                </div>
+                <div class="field">
+                    <label for="manual-template">Template</label>
+                    <select id="manual-template" @bind="_manualTemplate" required aria-invalid="@Invalid("templateCode")" aria-describedby="@Desc("templateCode", "manual-template", null)" data-testid="manual-template">
+                        <option value="">Choose a template…</option>
+                        @foreach (var t in _templates.Where(t => t.IsActive))
+                        {
+                            <option value="@t.Code">@t.Name (@t.Channel)</option>
+                        }
+                    </select>
+                    <FieldError Errors="@Problem?.For("templateCode")" Id="manual-template-error" />
+                </div>
+                <div class="field span-2">
+                    <label for="manual-message">Message @(_manualTemplate == "manual.general" ? "" : "(optional)")</label>
+                    <textarea id="manual-message" @bind="_manualMessage" maxlength="2000" aria-invalid="@Invalid("message")" aria-describedby="@Desc("message", "manual-message", "manual-message-hint")" data-testid="manual-message"></textarea>
+                    <span class="field__hint" id="manual-message-hint">Required (5–2,000 characters) for the “General message” template; fills {{Message}} and {{Reason}} in others.</span>
+                    <FieldError Errors="@Problem?.For("message")" Id="manual-message-error" />
+                </div>
+            </div>
+            <div class="row"><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="manual-submit">Queue notification</button></div>
+        </form>
+    </section>
+}
+
+<section class="card card--flush" aria-labelledby="templates-title" data-testid="templates">
+    <h2 id="templates-title" class="card-title">Templates in use</h2>
+    <div class="table-wrap">
+        <table class="table table--cards table--compact">
+            <caption class="visually-hidden">Notification templates with how many messages each produced</caption>
+            <thead><tr><th scope="col">Template</th><th scope="col">Channel</th><th scope="col">State</th><th scope="col" class="num">Messages</th><th scope="col" class="num">Delivered</th><th scope="col" class="num">Failed</th><th scope="col">Last used</th></tr></thead>
+            <tbody>
+                @foreach (var t in _templates)
+                {
+                    <tr data-testid="template-row">
+                        <td data-label="Template"><strong>@t.Name</strong><br /><code class="muted">@t.Code</code></td>
+                        <td data-label="Channel">@t.Channel</td>
+                        <td data-label="State"><span class="chip @(t.IsActive ? "chip--good" : "chip--draft")">@(t.IsActive ? "Active" : "Inactive")</span></td>
+                        <td data-label="Messages" class="num">@t.Total</td>
+                        <td data-label="Delivered" class="num">@t.Delivered</td>
+                        <td data-label="Failed" class="num">@t.Failed</td>
+                        <td data-label="Last used">@(t.LastUsedAt is { } at ? Ui.Utc(at) : "Never")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "status")] public string? StatusQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "q")] public string? Search { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "id")] public Guid? SelectedId { get; set; }
+
+    private IReadOnlyList<NotificationRow>? _rows;
+    private int _total;
+    private IReadOnlyDictionary<NotificationStatus, int>? _counts;
+    private IReadOnlyList<TemplateUsage> _templates = [];
+    private NotificationDetail? _detail;
+    private bool _confirmRetry;
+    private IReadOnlyList<ConflictPanel.Row>? _conflict;
+    private string _fStatus = "", _fSearch = "";
+    private string _manualReference = "", _manualTemplate = "", _manualMessage = "";
+
+    private int Page => Math.Max(1, PageQuery ?? 1);
+    private NotificationStatus? StatusFilter => Enum.TryParse<NotificationStatus>(StatusQuery, out var s) ? s : null;
+    private bool CanManage => Me?.Can(Cap.ManageNotifications) == true;
+    private string LeadText => CanManage
+        ? "Template-driven outbox: delivery status, retries of failed messages, manual notifications and their audit trail."
+        : "Template-driven outbox and delivery status (read-only; recipients are masked for auditors).";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _fStatus = StatusFilter?.ToString() ?? "";
+        _fSearch = Search ?? "";
+        _confirmRetry = false;
+        _conflict = null;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        _conflict = null;
+        _confirmRetry = false;
+        await LoadAsync(async actor =>
+        {
+            _counts = await NotificationSvc.StatusCountsAsync(actor);
+            (_rows, _total) = await NotificationSvc.ListAsync(actor, new NotificationFilter(StatusFilter, Search, Page));
+            _templates = await NotificationSvc.TemplatesAsync(actor);
+            _detail = SelectedId is { } id ? await NotificationSvc.GetAsync(actor, id) : null;
+        });
+    }
+
+    private void ApplyFilters() => Nav.NavigateTo(Link(Enum.TryParse<NotificationStatus>(_fStatus, out var s) ? s : null, _fSearch.Trim(), 1, null));
+
+    private static string Link(NotificationStatus? status, string? search, int page, Guid? id)
+    {
+        var q = new List<string>();
+        if (status is { } s) q.Add($"status={s}");
+        if (!string.IsNullOrWhiteSpace(search)) q.Add($"q={Uri.EscapeDataString(search)}");
+        if (page > 1) q.Add($"page={page}");
+        if (id is { } i) q.Add($"id={i}");
+        return "/notifications" + (q.Count > 0 ? "?" + string.Join("&", q) : "");
+    }
+
+    private async Task ConfirmRetryAsync()
+    {
+        if (_detail is null) return;
+        var row = _detail.Row;
+        _conflict = null;
+        var ok = await RunAsync(async actor => await NotificationSvc.RetryAsync(actor, row.Id, row.Version), "Message queued for another attempt.");
+        var problem = Problem;
+        await LoadAsync(async actor =>
+        {
+            _counts = await NotificationSvc.StatusCountsAsync(actor);
+            (_rows, _total) = await NotificationSvc.ListAsync(actor, new NotificationFilter(StatusFilter, Search, Page));
+            _detail = await NotificationSvc.GetAsync(actor, row.Id);
+        });
+        _confirmRetry = false;
+        if (!ok)
+        {
+            Problem = problem;
+            if (problem?.StatusCode == 409)
+                _conflict = [new("Status", _detail?.Row.Status.ToString(), "Queued (retry)"), new("Attempts", _detail?.Row.Attempts.ToString(Ui.Culture), "0")];
+        }
+    }
+
+    private async Task SendManualAsync()
+    {
+        var reference = _manualReference;
+        var template = _manualTemplate;
+        var message = _manualMessage;
+        CaseTarget? target = null;
+        var ok = await RunAsync(async actor =>
+        {
+            var errors = new Dictionary<string, string[]>();
+            if (string.IsNullOrWhiteSpace(reference)) errors["reference"] = ["Enter the case reference."];
+            if (string.IsNullOrEmpty(template)) errors["templateCode"] = ["Choose a template."];
+            if (template == "manual.general" && message.Trim().Length < 5) errors["message"] = ["Write the message (at least 5 characters)."];
+            if (errors.Count > 0) throw new ValidationException(errors);
+            target = await NotificationSvc.FindCaseAsync(actor, reference);
+            await NotificationSvc.SendManualAsync(actor, target.ApplicationId, template, message);
+        }, $"Notification queued for {reference.Trim().ToUpperInvariant()}.");
+        if (!ok) return;
+        _manualReference = _manualTemplate = _manualMessage = "";
+        await LoadAsync(async actor =>
+        {
+            _counts = await NotificationSvc.StatusCountsAsync(actor);
+            (_rows, _total) = await NotificationSvc.ListAsync(actor, new NotificationFilter(StatusFilter, Search, Page));
+            _templates = await NotificationSvc.TemplatesAsync(actor);
+        });
+    }
+
+    private string? Desc(string field, string id, string? hint)
+    {
+        var parts = new List<string>();
+        if (hint is not null) parts.Add(hint);
+        if (Invalid(field) is not null) parts.Add($"{id}-error");
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    public static string StatusCss(NotificationStatus s) => s switch
+    {
+        NotificationStatus.Queued => "chip--progress",
+        NotificationStatus.Sent => "chip--brand",
+        NotificationStatus.Delivered => "chip--good",
+        _ => "chip--bad",
+    };
+
+    private static string TileCss(NotificationStatus s) => s switch
+    {
+        NotificationStatus.Failed => "kpi--danger",
+        NotificationStatus.Delivered => "kpi--ok",
+        NotificationStatus.Queued => "kpi--warn",
+        _ => "",
+    };
+}

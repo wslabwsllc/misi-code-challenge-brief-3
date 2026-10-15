@@ -1,0 +1,115 @@
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject AdminService Admin
+
+<section class="card card--flush ur-section" id="rules" aria-labelledby="rules-title" data-testid="ur-rules">
+    <div class="ur-section__head">
+        <h2 id="rules-title">Business rules</h2>
+        <p class="muted">Thresholds used by scheduling, reviews, links, files and integrations. Values are whole numbers within the allowed range; changes apply within seconds without a restart and are audited.</p>
+    </div>
+    <div class="ur-pad">
+        <ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+        <LiveRegion Message="@Announcement" />
+        @if (_conflictId is { } cid && _rules.FirstOrDefault(r => r.Id == cid) is { } saved)
+        {
+            <ConflictPanel Rows="@([new ConflictPanel.Row(saved.Key, saved.Value, _edits.GetValueOrDefault(cid))])" OnReload="ReloadAsync" OnReapply="() => SaveAsync(saved)" />
+        }
+    </div>
+
+    @if (Loading && _rules.Count == 0)
+    {
+        <p class="muted ur-pad" role="status">Loading rules…</p>
+    }
+    else if (_rules.Count == 0)
+    {
+        <div class="ur-pad"><EmptyState Title="No rule settings are configured" /></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact">
+                <caption class="visually-hidden">Business rule settings</caption>
+                <thead><tr><th scope="col">Rule</th><th scope="col">Allowed range</th><th scope="col">Value</th></tr></thead>
+                <tbody>
+                    @foreach (var r in _rules)
+                    {
+                        var inputId = $"rule-{r.Key}";
+                        var errorId = $"rule-{r.Key}-error";
+                        var mine = _savingId == r.Id;
+                        <tr data-testid="@($"rule-row-{r.Key}")">
+                            <td data-label="Rule"><span class="mono">@r.Key</span><br /><span class="muted">@r.Description</span></td>
+                            <td data-label="Allowed range">@Range(r)</td>
+                            <td data-label="Value">
+                                @if (CanEdit)
+                                {
+                                    <form class="ur-inline" @onsubmit="() => SaveAsync(r)" @onsubmit:preventDefault novalidate>
+                                        <label for="@inputId" class="visually-hidden">Value for @r.Key</label>
+                                        <input id="@inputId" inputmode="numeric" value="@(_edits.TryGetValue(r.Id, out var e) ? e : r.Value)"
+                                               @onchange="ev => _edits[r.Id] = ev.Value?.ToString() ?? string.Empty"
+                                               aria-invalid="@(mine ? Invalid("value") : null)" aria-describedby="@errorId" data-testid="@($"rule-input-{r.Key}")" />
+                                        <button type="submit" class="btn btn--small" disabled="@Busy" data-testid="@($"rule-save-{r.Key}")">Save<span class="visually-hidden"> @r.Key</span></button>
+                                        <span id="@errorId" class="field__error" data-testid="@($"rule-error-{r.Key}")">@(mine ? string.Join(" ", Problem?.For("value") ?? []) : null)</span>
+                                    </form>
+                                }
+                                else
+                                {
+                                    <strong data-testid="@($"rule-value-{r.Key}")">@r.Value</strong>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    private IReadOnlyList<RuleRow> _rules = [];
+    private readonly Dictionary<Guid, string> _edits = [];
+    private Guid? _savingId;
+    private Guid? _conflictId;
+
+    private bool CanEdit => Me?.Can(Cap.ManageRules) == true;
+
+    protected override Task OnInitializedAsync() => LoadAsync(async actor => _rules = await Admin.RulesAsync(actor));
+
+    private async Task ReloadAsync()
+    {
+        _conflictId = null;
+        _savingId = null;
+        _edits.Clear();
+        await RunAsync(async actor => _rules = await Admin.RulesAsync(actor), "Rules reloaded.");
+    }
+
+    private async Task SaveAsync(RuleRow row)
+    {
+        _savingId = row.Id;
+        _conflictId = null;
+        var value = _edits.TryGetValue(row.Id, out var e) ? e : row.Value;
+        var current = _rules.FirstOrDefault(r => r.Id == row.Id) ?? row;
+        if (await RunAsync(async actor =>
+            {
+                await Admin.UpdateRuleAsync(actor, row.Id, current.Version, value);
+                _rules = await Admin.RulesAsync(actor);
+            }, $"{row.Key} saved as {value.Trim()}."))
+        {
+            _edits.Remove(row.Id);
+            _savingId = null;
+        }
+        else if (Problem?.StatusCode == 409)
+        {
+            // Show the saved value beside the unsaved one; re-applying uses the fresh version.
+            _conflictId = row.Id;
+            await LoadAsync(async actor => _rules = await Admin.RulesAsync(actor));
+        }
+    }
+
+    private static string Range(RuleRow r) => (r.Min, r.Max) switch
+    {
+        ({ } min, { } max) => $"{min} to {max}",
+        ({ } min, null) => $"at least {min}",
+        (null, { } max) => $"at most {max}",
+        _ => "any whole number",
+    };
+}

@@ -1,0 +1,420 @@
+@page "/calendar"
+@attribute [Authorize(Policy = Cap.ViewSchedule)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@implements IAsyncDisposable
+@inject SchedulingService Scheduling
+@inject AdminService Admin
+
+<PageTitle>Event Calendar · Memorial Event Operations</PageTitle>
+<PageHeader Title="Event Calendar" Lead="Persisted reservations, regional calendar events, partner events and closures. Times are shown in each venue's own time zone.">
+    <Actions>
+        <a class="btn" href="venues/availability" data-testid="cal-open-availability">Venue availability</a>
+    </Actions>
+</PageHeader>
+<ProblemAlert Problem="Problem" OnRetry="LoadItemsAsync" />
+<LiveRegion Message="@Announcement" Visible="false" />
+
+<form class="filters" @onsubmit:preventDefault data-testid="cal-filters">
+    <div class="field">
+        <label for="c-cemetery">Cemetery</label>
+        <select id="c-cemetery" value="@(_cemeteryId?.ToString() ?? "")" @onchange="@(e => Set("cemetery", e.Value, resetVenue: true))" data-testid="cal-cemetery">
+            <option value="">All cemeteries</option>
+            @foreach (var c in _venues.GroupBy(v => (v.CemeteryId, v.CemeteryName)))
+            {
+                <option value="@c.Key.CemeteryId">@c.Key.CemeteryName</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="c-venue">Venue</label>
+        <select id="c-venue" value="@(_venueId?.ToString() ?? "")" @onchange="@(e => Set("venue", e.Value))" data-testid="cal-venue">
+            <option value="">All venues</option>
+            @foreach (var v in _venues.Where(v => _cemeteryId is null || v.CemeteryId == _cemeteryId))
+            {
+                <option value="@v.Id">@v.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="c-kind">Show</label>
+        <select id="c-kind" value="@(KindQuery ?? "")" @onchange="@(e => Set("kind", e.Value))" data-testid="cal-kind">
+            <option value="">Everything</option>
+            @foreach (var k in Kinds)
+            {
+                <option value="@k">@KindLabel(k)s only</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="c-status">Reservation status</label>
+        <select id="c-status" value="@(_status?.ToString() ?? "")" @onchange="@(e => Set("status", e.Value))" data-testid="cal-status">
+            <option value="">Any status</option>
+            @foreach (var s in ScheduleStatuses)
+            {
+                <option value="@s">@Workflow.Display(s)</option>
+            }
+        </select>
+    </div>
+</form>
+
+<div class="cal-toolbar">
+    <div class="row" role="group" aria-label="Move through the calendar">
+        <button type="button" class="btn btn--small" @onclick="() => Move(-1)" data-testid="cal-prev">‹ Previous @ViewNoun</button>
+        <button type="button" class="btn btn--small" @onclick="GoToday" data-testid="cal-today">Today</button>
+        <button type="button" class="btn btn--small" @onclick="() => Move(1)" data-testid="cal-next">Next @ViewNoun ›</button>
+    </div>
+    <h2 class="cal-toolbar__title" id="cal-range" data-testid="cal-range">@RangeTitle</h2>
+    <form class="cal-jump" @onsubmit="JumpAsync" @onsubmit:preventDefault novalidate data-testid="cal-jump">
+        <div class="field">
+            <label for="c-jump">Go to date</label>
+            <input id="c-jump" type="date" @bind="_jump" aria-invalid="@Invalid("jumpDate")" aria-describedby="@Describe("jumpDate")" data-testid="cal-jump-date" />
+            <FieldErrors Id="@ErrorId("jumpDate")" Messages="@(Errors("jumpDate"))" />
+        </div>
+        <button type="submit" class="btn btn--small" data-testid="cal-jump-go">Go</button>
+    </form>
+    <div class="segmented" role="group" aria-label="Calendar view">
+        @foreach (var (view, label) in Views)
+        {
+            <button type="button" class="segmented__btn" aria-pressed="@(_view == view ? "true" : "false")" @onclick="@(() => Set("view", view))" data-testid="cal-view-@view">@label</button>
+        }
+    </div>
+</div>
+
+<ul class="cal-legend" aria-label="Legend: every kind of calendar entry">
+    <li><span class="cal-legend__swatch k-reservation" aria-hidden="true"></span>Reservation (case status shown in text)</li>
+    <li><span class="cal-legend__swatch k-external" aria-hidden="true"></span>Regional calendar event (external)</li>
+    <li><span class="cal-legend__swatch k-partner" aria-hidden="true"></span>Partner event (imported roster)</li>
+    <li><span class="cal-legend__swatch k-blackout" aria-hidden="true"></span>Closure (blackout; nobody may book)</li>
+</ul>
+
+<div @ref="_gridHost" data-testid="cal-host">
+    @if (Loading)
+    {
+        <p class="muted" role="status">Loading the calendar…</p>
+    }
+    else if (_view == "month")
+    {
+        <p class="muted cal-hint" id="cal-keys">Use the arrow keys to move between days; press Enter on a day to open it.</p>
+        <table class="calm" aria-labelledby="cal-range" aria-describedby="cal-keys" data-testid="cal-month" data-cols="7">
+            <thead>
+                <tr>@foreach (var d in WeekDays) { <th scope="col"><abbr title="@d">@d[..3]</abbr></th> }</tr>
+            </thead>
+            <tbody>
+                @foreach (var week in Days().Chunk(7))
+                {
+                    <tr>
+                        @foreach (var day in week)
+                        {
+                            var items = ItemsOn(day);
+                            <td class="calm__day @(day.Month != _anchor.Month ? "is-other" : null) @(day == _today ? "is-today" : null)" data-date="@Date(day)">
+                                <div class="calm__head">
+                                    <button type="button" class="calm__date" data-cal-day tabindex="@(day == FocusDate ? 0 : -1)" @onclick="() => OpenDay(day)" data-testid="cal-day">
+                                        @day.Day<span class="visually-hidden">@DayRest(day, items.Count)</span>
+                                    </button>
+                                    @if (items.Count > 0) { <span class="calm__count" aria-hidden="true">@items.Count</span> }
+                                </div>
+                                <ul class="calm__items">
+                                    @foreach (var item in items.Take(4))
+                                    {
+                                        <li>@Entry(item, true)</li>
+                                    }
+                                    @if (items.Count > 4)
+                                    {
+                                        <li><button type="button" class="btn--link calm__more" @onclick="() => OpenDay(day)">+@(items.Count - 4) more on @day.ToString("d MMM", Ui.Culture)</button></li>
+                                    }
+                                </ul>
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else if (_view == "week")
+    {
+        <p class="muted cal-hint" id="cal-keys">Use the left and right arrow keys to move between days.</p>
+        <div class="calw" data-testid="cal-week" data-cols="7" aria-describedby="cal-keys">
+            @foreach (var day in Days())
+            {
+                var items = ItemsOn(day);
+                <section class="calw__day @(day == _today ? "is-today" : null)" aria-label="@day.ToString("dddd d MMMM", Ui.Culture)">
+                    <h3 class="calw__head">
+                        <button type="button" class="calm__date calw__date" data-cal-day tabindex="@(day == FocusDate ? 0 : -1)" @onclick="() => OpenDay(day)" data-testid="cal-day">
+                            @day.ToString("ddd d MMM", Ui.Culture)<span class="visually-hidden">@DayRest(day, items.Count, withDate: false)</span>
+                        </button>
+                    </h3>
+                    @if (items.Count == 0)
+                    {
+                        <p class="muted calw__empty">Nothing scheduled</p>
+                    }
+                    else
+                    {
+                        <ul class="calm__items">
+                            @foreach (var item in items)
+                            {
+                                <li>@Entry(item, false)</li>
+                            }
+                        </ul>
+                    }
+                </section>
+            }
+        </div>
+    }
+    else
+    {
+        var items = ItemsOn(_anchor);
+        <div class="split" data-testid="cal-dayview">
+            <section class="card card--flush" aria-labelledby="dayview-title">
+                <h3 class="cald__title" id="dayview-title">@Ui.Plural(items.Count, "entry", "entries") on @_anchor.ToString("dddd d MMMM yyyy", Ui.Culture)</h3>
+                @if (items.Count == 0)
+                {
+                    <EmptyState Title="Nothing scheduled on this day"><p>No reservations, events or closures match the filters.</p></EmptyState>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table--cards">
+                            <caption class="visually-hidden">Calendar entries on @_anchor.ToString("d MMMM yyyy", Ui.Culture), venue-local times</caption>
+                            <thead><tr><th scope="col">Time (venue-local)</th><th scope="col">Kind</th><th scope="col">Entry</th><th scope="col">Venue</th></tr></thead>
+                            <tbody>
+                                @foreach (var item in items)
+                                {
+                                    <tr data-testid="cal-entry" data-kind="@item.Kind">
+                                        <td data-label="Time">@Ui.Local(item.StartUtc, item.TimeZoneId, "HH:mm")–@Ui.LocalTime(item.EndUtc, item.TimeZoneId)</td>
+                                        <td data-label="Kind"><span class="kind k-@item.Kind">@KindLabel(item.Kind)</span></td>
+                                        <td data-label="Entry">
+                                            @if (item.ApplicationId is { } id)
+                                            {
+                                                <a href="applications/detail?id=@id">@item.Label</a>
+                                            }
+                                            else
+                                            {
+                                                @item.Label
+                                            }
+                                            @if (item.Status is { } st) { <br /><StatusChip Status="st" /> }
+                                        </td>
+                                        <td data-label="Venue">@item.VenueName</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+            <section class="card" aria-labelledby="slots-title" data-testid="cal-slots">
+                <h3 id="slots-title">Free slots</h3>
+                @if (_venueId is null)
+                {
+                    <p class="muted">Choose a venue in the filters to see its free starts on this day.</p>
+                }
+                else if (_slots.Count == 0)
+                {
+                    <p class="muted">@SelectedVenueName is closed on @_anchor.DayOfWeek.</p>
+                }
+                else
+                {
+                    <p class="muted">One-hour starts at @SelectedVenueName, checked against closures, reservations with buffers, external and partner events. Choose a free start to propose a reservation for an eligible case.</p>
+                    <ul class="slots">
+                        @foreach (var slot in _slots)
+                        {
+                            var time = Ui.LocalTime(slot.StartUtc, SelectedZone);
+                            <li>
+                                @if (slot.Free)
+                                {
+                                    <a class="slot" href="@ProposalHref(slot)" data-testid="cal-free-slot">@time · free — propose a reservation</a>
+                                }
+                                else
+                                {
+                                    <span class="slot slot--busy" data-testid="cal-busy-slot">@time · unavailable: @slot.Reason</span>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly string[] Kinds = ["reservation", "external", "partner", "blackout"];
+    private static readonly (string, string)[] Views = [("month", "Month"), ("week", "Week"), ("day", "Day")];
+    private static readonly string[] WeekDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    private static readonly CaseStatus[] ScheduleStatuses = [CaseStatus.TentativelyReserved, CaseStatus.PendingApproval, CaseStatus.Approved, CaseStatus.Permitted,
+        CaseStatus.CheckedIn, CaseStatus.EventCompleted, CaseStatus.Closed];
+
+    [SupplyParameterFromQuery(Name = "view")] public string? ViewQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "date")] public string? DateQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "venue")] public Guid? VenueQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "status")] public string? StatusQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "kind")] public string? KindQuery { get; set; }
+
+    private IReadOnlyList<VenueRow> _venues = [];
+    private IReadOnlyList<CalendarItem> _items = [];
+    private IReadOnlyList<SlotOption> _slots = [];
+    private string _view = "month";
+    private DateOnly _anchor;
+    private DateOnly _today;
+    private Guid? _cemeteryId;
+    private Guid? _venueId;
+    private CaseStatus? _status;
+    private ElementReference _gridHost;
+    private IJSObjectReference? _module;
+    private string? _loadedKey;
+
+    private string ViewNoun => _view;
+    private string? SelectedVenueName => _venues.FirstOrDefault(v => v.Id == _venueId)?.Name;
+    private string? SelectedZone => _venues.FirstOrDefault(v => v.Id == _venueId)?.TimeZoneId;
+
+    private DateOnly FocusDate => _anchor;
+
+    private string RangeTitle => _view switch
+    {
+        "month" => _anchor.ToString("MMMM yyyy", Ui.Culture),
+        "week" => $"Week of {Days().First().ToString("d MMM", Ui.Culture)} – {Days().Last().ToString("d MMM yyyy", Ui.Culture)}",
+        _ => _anchor.ToString("dddd d MMMM yyyy", Ui.Culture),
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _view = ViewQuery is "week" or "day" ? ViewQuery : "month";
+        _today = LocalDate(Clock.GetUtcNow(), "America/New_York");
+        _anchor = ParseDate(DateQuery) ?? _today;
+        _cemeteryId = CemeteryQuery;
+        _venueId = VenueQuery;
+        _status = Enum.TryParse<CaseStatus>(StatusQuery, out var s) ? s : null;
+        var key = $"{_view}|{_anchor}|{_cemeteryId}|{_venueId}";
+        if (key == _loadedKey) return; // status and kind filters apply to the loaded items
+        _loadedKey = key;
+        await LoadItemsAsync();
+    }
+
+    private async Task LoadItemsAsync()
+    {
+        Problem = null;
+        await LoadAsync(async me =>
+        {
+            if (_venues.Count == 0) _venues = await Admin.VenuesAsync(me);
+            if (_venueId is { } v && _venues.FirstOrDefault(x => x.Id == v) is { } venue) _cemeteryId ??= venue.CemeteryId;
+            var days = Days().ToList();
+            // A day either side covers every venue time zone; entries are then placed on their venue-local date.
+            var from = new DateTimeOffset(days[0].AddDays(-1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            var to = new DateTimeOffset(days[^1].AddDays(2).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            _items = await Scheduling.CalendarAsync(me, from, to, _cemeteryId, _venueId);
+            _slots = _view == "day" && _venueId is { } vid ? await Scheduling.DaySlotsAsync(me, vid, _anchor, 60) : [];
+        });
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await base.OnAfterRenderAsync(firstRender);
+        if (!firstRender) return;
+        try
+        {
+            _module = await Js.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Scheduling/EventCalendar.razor.js");
+            await _module.InvokeVoidAsync("init", _gridHost);
+        }
+        catch (JSDisconnectedException)
+        {
+            // circuit closed before the module loaded
+        }
+    }
+
+    private IEnumerable<DateOnly> Days()
+    {
+        if (_view == "day")
+        {
+            yield return _anchor;
+            yield break;
+        }
+        var start = _view == "month" ? new DateOnly(_anchor.Year, _anchor.Month, 1) : _anchor;
+        start = start.AddDays(-(((int)start.DayOfWeek + 6) % 7)); // back to Monday
+        var count = _view == "month" ? 42 : 7;
+        for (var i = 0; i < count; i++) yield return start.AddDays(i);
+    }
+
+    private List<CalendarItem> ItemsOn(DateOnly day) => _items
+        .Where(i => KindQuery is null or "" || i.Kind == KindQuery)
+        .Where(i => _status is null || i.Kind != "reservation" || i.Status == _status)
+        .Where(i => LocalDate(i.StartUtc, i.TimeZoneId) <= day && LocalDate(i.EndUtc.AddTicks(-1), i.TimeZoneId) >= day)
+        .OrderBy(i => i.StartUtc).ToList();
+
+    /// <summary>Screen-reader rest of a day button's name; the visible date stays first so the name contains the visible text.</summary>
+    private static string DayRest(DateOnly day, int count, bool withDate = true) =>
+        (withDate ? $" {day.ToString("MMMM yyyy, dddd", Ui.Culture)}" : $" {day.Year}") +
+        $", {(count == 0 ? "nothing scheduled" : Ui.Plural(count, "entry", "entries"))}. Open day view.";
+
+    private RenderFragment Entry(CalendarItem item, bool compact) => __builder =>
+    {
+        var text = $"{Ui.LocalTime(item.StartUtc, item.TimeZoneId)} {KindLabel(item.Kind)}: {item.Label}" +
+                   (item.Status is { } st ? $" ({Workflow.Display(st)})" : "") + (compact ? "" : $" · {item.VenueName} ({Ui.ShortZone(item.TimeZoneId)})");
+        if (item.ApplicationId is { } id)
+        {
+            <a class="cal__item cal__item--@item.Kind" href="applications/detail?id=@id" title="@text" data-testid="cal-item" data-kind="@item.Kind">@text</a>
+        }
+        else
+        {
+            <span class="cal__item cal__item--@item.Kind" title="@text" data-testid="cal-item" data-kind="@item.Kind">@text</span>
+        }
+    };
+
+    private string ProposalHref(SlotOption slot) =>
+        $"venues/availability?venue={_venueId}&date={Date(_anchor)}&start={Ui.LocalTime(slot.StartUtc, SelectedZone)}";
+
+    private void Set(string key, object? value, bool resetVenue = false)
+    {
+        var text = value?.ToString();
+        var query = new Dictionary<string, object?> { [key] = string.IsNullOrEmpty(text) ? null : text };
+        if (resetVenue) query["venue"] = null;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(query));
+    }
+
+    private void Move(int direction)
+    {
+        var next = _view switch
+        {
+            "month" => _anchor.AddMonths(direction),
+            "week" => _anchor.AddDays(7 * direction),
+            _ => _anchor.AddDays(direction),
+        };
+        Announcement = $"Showing {_view} of {next.ToString("d MMMM yyyy", Ui.Culture)}.";
+        Set("date", Date(next));
+    }
+
+    private void GoToday() => Set("date", Date(_today));
+
+    private DateOnly? _jump;
+
+    private void JumpAsync()
+    {
+        if (_jump is not { } target)
+        {
+            Fail(new Dictionary<string, string[]> { ["jumpDate"] = ["Enter a date to go to."] });
+            return;
+        }
+        if (target.Year is < 2000 or > 2100)
+        {
+            Fail(new Dictionary<string, string[]> { ["jumpDate"] = ["Choose a date between 2000 and 2100."] });
+            return;
+        }
+        Problem = null;
+        Set("date", Date(target));
+    }
+
+    private void OpenDay(DateOnly day) => Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["view"] = "day", ["date"] = Date(day) }));
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_module is null) return;
+        try
+        {
+            await _module.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+            // circuit already gone
+        }
+    }
+}

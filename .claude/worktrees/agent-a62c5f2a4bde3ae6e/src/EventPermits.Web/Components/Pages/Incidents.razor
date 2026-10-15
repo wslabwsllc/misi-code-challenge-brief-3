@@ -1,0 +1,639 @@
+@page "/incidents"
+@attribute [Authorize(Policy = Cap.ViewIncidents)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject IncidentService IncidentSvc
+@inject OperationsService Ops
+@inject FileService FileSvc
+
+<PageTitle>Incident Register · Memorial Event Operations</PageTitle>
+<PageHeader Title="Incident Register" Lead="@LeadText">
+    <Actions>
+        @if (CanReport)
+        {
+            <button type="button" class="btn btn--primary" aria-expanded="@(_showForm ? "true" : "false")" aria-controls="incident-form" @onclick="ToggleForm" data-testid="incident-new">
+                @(_showForm ? "Cancel new incident" : "Log an incident")
+            </button>
+        }
+    </Actions>
+</PageHeader>
+
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" />
+@if (RendererInfo.IsInteractive)
+{
+    <span hidden data-testid="interactive"></span>
+}
+
+@if (_showForm && CanReport)
+{
+    <section class="card" id="incident-form" aria-labelledby="new-title" data-testid="incident-form">
+        <h2 id="new-title">Log an incident</h2>
+        @if (_targets.Count == 0)
+        {
+            <EmptyState Title="No event to log against">
+                <p>Incidents are logged for permitted, checked-in or completed events@(IsAttendantOnly ? " that you are assigned to" : "").</p>
+            </EmptyState>
+        }
+        else
+        {
+            <form class="form" @onsubmit="CreateAsync" @onsubmit:preventDefault novalidate>
+                <div class="form-grid">
+                    <div class="field span-2">
+                        <label for="new-event">Event</label>
+                        <select id="new-event" @bind="_newTarget" required aria-invalid="@Invalid("applicationId")" aria-describedby="@Err("applicationId", "new-event")" data-testid="new-event">
+                            <option value="">Choose the event…</option>
+                            @foreach (var t in _targets)
+                            {
+                                <option value="@t.ApplicationId">@t.Reference · @t.Title@(t.StartUtc is { } s ? $" · {Ui.Local(s, t.TimeZoneId, "d MMM HH:mm")}" : "") (@Workflow.Display(t.Status))</option>
+                            }
+                        </select>
+                        <FieldError Errors="@Problem?.For("applicationId")" Id="new-event-error" />
+                    </div>
+                    <IncidentFields Model="_newInput" Prefix="new" Owners="_owners" Problem="Problem" />
+                </div>
+                <div class="row">
+                    <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="new-submit">Log incident</button>
+                </div>
+            </form>
+        }
+    </section>
+}
+
+@if (_closure is { Count: > 0 })
+{
+    <section class="card card--flush" aria-labelledby="closure-title" data-testid="closure-queue">
+        <h2 id="closure-title" class="card-title">Completed events awaiting closure</h2>
+        <p class="card-lead">Closing a case (T13) is blocked while a High or Critical incident on it is unresolved.</p>
+        <div class="table-wrap">
+            <table class="table table--cards">
+                <caption class="visually-hidden">Completed events and their blocking incidents</caption>
+                <thead><tr><th scope="col">Case</th><th scope="col">Event date</th><th scope="col">Blocking incidents</th><th scope="col">Close</th></tr></thead>
+                <tbody>
+                    @foreach (var c in _closure)
+                    {
+                        <tr data-testid="closure-row" data-reference="@c.Reference">
+                            <td data-label="Case"><strong>@c.Reference</strong><br />@c.Title</td>
+                            <td data-label="Event date">@(c.StartUtc is { } s ? Local(s, c.TimeZoneId) : "—")</td>
+                            <td data-label="Blocking">
+                                @if (c.BlockingIncidents.Count == 0)
+                                {
+                                    <span class="chip chip--good">None</span>
+                                }
+                                else
+                                {
+                                    <span class="chip chip--bad">@string.Join(", ", c.BlockingIncidents)</span>
+                                }
+                            </td>
+                            <td data-label="Close">
+                                <button type="button" class="btn btn--small @(c.BlockingIncidents.Count == 0 ? "btn--primary" : null)" disabled="@Busy" @onclick="() => CloseCaseAsync(c)" data-testid="close-case">
+                                    Close case<span class="visually-hidden"> @c.Reference</span>
+                                </button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+}
+
+<form class="filters" @onsubmit="ApplyFilters" @onsubmit:preventDefault novalidate data-testid="incident-filters">
+    <div class="field">
+        <label for="f-severity">Severity</label>
+        <select id="f-severity" @bind="_fSeverity" data-testid="filter-severity">
+            <option value="">Any severity</option>
+            @foreach (var s in Enum.GetValues<IncidentSeverity>())
+            {
+                <option value="@s">@s</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-status">Status</label>
+        <select id="f-status" @bind="_fStatus" data-testid="filter-status">
+            <option value="">Any status</option>
+            @foreach (var s in Enum.GetValues<IncidentStatus>())
+            {
+                <option value="@s">@s</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-cemetery">Cemetery</label>
+        <select id="f-cemetery" @bind="_fCemetery">
+            <option value="">All cemeteries</option>
+            @foreach (var c in _cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="f-from">Reported from</label>
+        <input id="f-from" type="date" @bind="_fFrom" aria-invalid="@Invalid("from")" aria-describedby="@Err("from", "f-from")" />
+        <FieldError Errors="@Problem?.For("from")" Id="f-from-error" />
+    </div>
+    <div class="field">
+        <label for="f-to">Reported to</label>
+        <input id="f-to" type="date" @bind="_fTo" />
+    </div>
+    <div class="row">
+        <button type="submit" class="btn btn--primary" data-testid="filter-apply">Filter</button>
+        <a class="btn" href="/incidents">Clear</a>
+    </div>
+</form>
+
+@if (Loading && _rows is null)
+{
+    <p role="status">Loading incidents…</p>
+}
+else if (_rows is not null)
+{
+    @if (_rows.Count == 0)
+    {
+        <EmptyState Title="No incidents match">
+            <p>@(HasFilters ? "Change or clear the filters." : CanReport ? "Use “Log an incident” when something happens at an event." : "Nothing has been reported yet.")</p>
+        </EmptyState>
+    }
+    else
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="incident-table">
+                    <caption>Unresolved first, then by severity; @Ui.Plural(_total, "incident", "incidents")</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Incident</th><th scope="col">Severity</th><th scope="col">Status</th><th scope="col">Event</th>
+                            <th scope="col">Follow-up</th><th scope="col">Reported</th><th scope="col"><span class="visually-hidden">Open</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _rows)
+                        {
+                            <tr data-testid="incident-row" data-reference="@r.Reference" class="@(SelectedId == r.Id ? "is-selected" : null)">
+                                <td data-label="Incident"><strong>@r.Reference</strong><br />@r.Category@(r.Photos > 0 ? $" · {Ui.Plural(r.Photos, "photo", "photos")}" : "")</td>
+                                <td data-label="Severity"><span class="chip @Ui.SeverityClass(r.Severity)">@r.Severity</span></td>
+                                <td data-label="Status"><span class="chip @StatusCss(r.Status)">@r.Status</span></td>
+                                <td data-label="Event">@r.CaseReference<br /><span class="muted">@r.EventTitle</span></td>
+                                <td data-label="Follow-up">
+                                    @(r.OwnerName ?? "No owner")@if (r.DueDate is { } due) { <br /><span class="muted">due @due.ToString("d MMM yyyy", Ui.Culture)</span> }
+                                    @if (r.Overdue) { <br /><span class="chip chip--bad" data-testid="overdue">Overdue</span> }
+                                </td>
+                                <td data-label="Reported">@r.ReportedByName<br /><span class="muted">@Ui.Utc(r.CreatedAt)</span></td>
+                                <td data-label="Open">
+                                    <a class="btn btn--small" href="@Link(page: Page, id: r.Id)" data-testid="incident-open">Open<span class="visually-hidden"> @r.Reference</span></a>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="Page" Total="_total" OnPage="p => Nav.NavigateTo(Link(page: p, id: SelectedId))" />
+        </div>
+    }
+}
+
+@if (_incident is not null)
+{
+    var i = _incident;
+    <section class="card incident-detail" id="incident-detail" aria-labelledby="detail-title" data-testid="incident-detail" data-status="@i.Status">
+        <div class="row row--between">
+            <h2 id="detail-title" tabindex="-1">@i.Reference · @i.Category</h2>
+            <div class="row">
+                <span class="chip @Ui.SeverityClass(i.Severity)">@i.Severity</span>
+                <span class="chip @StatusCss(i.Status)" data-testid="detail-status">@i.Status</span>
+            </div>
+        </div>
+        @if (_conflict is not null)
+        {
+            <ConflictPanel Rows="_conflict" OnReload="ReloadDetailAsync" OnReapply="ReapplyAsync" />
+        }
+        <div class="split">
+            <div class="stack">
+                <dl class="dl">
+                    <dt>Case</dt><dd>@_caseReference</dd>
+                    <dt>Reported</dt><dd>@i.ReportedByName · @Ui.Utc(i.CreatedAt)</dd>
+                    <dt>Follow-up owner</dt><dd>@(i.OwnerName ?? "None")</dd>
+                    <dt>Due</dt><dd>@(i.DueDate?.ToString("d MMM yyyy", Ui.Culture) ?? "No due date")@(i.IsOverdue && i.Status != IncidentStatus.Resolved ? " (overdue)" : "")</dd>
+                    <dt>Description</dt><dd class="prewrap">@i.Description</dd>
+                    <dt>Corrective action</dt><dd class="prewrap">@(string.IsNullOrEmpty(i.CorrectiveAction) ? "None recorded" : i.CorrectiveAction)</dd>
+                    @if (i.EscalatedAt is { } esc)
+                    {
+                        <dt>Escalated</dt><dd>@Ui.Utc(esc)</dd>
+                    }
+                    @if (i.Status == IncidentStatus.Resolved)
+                    {
+                        <dt>Resolution</dt><dd class="prewrap" data-testid="detail-resolution">@i.Resolution · @i.ResolvedBy@(i.ResolvedAt is { } ra ? $", {Ui.Utc(ra)}" : "")</dd>
+                    }
+                </dl>
+
+                <h3>Photos</h3>
+                @if (_photos.Count == 0)
+                {
+                    <p class="muted">No photos.</p>
+                }
+                else
+                {
+                    <ul class="photo-list" data-testid="photo-list">
+                        @foreach (var p in _photos)
+                        {
+                            <li>
+                                <span>@p.FileName <span class="muted">(@((p.SizeBytes / 1024.0).ToString("N0", Ui.Culture)) KB, @p.UploadedBy)</span></span>
+                                @if (p.CanDownload)
+                                {
+                                    <button type="button" class="btn btn--small" @onclick="() => OpenPhotoAsync(p.Id)">Open<span class="visually-hidden"> @p.FileName</span></button>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+                @if (CanReport && i.Status != IncidentStatus.Resolved)
+                {
+                    <div class="field">
+                        <label for="photo-file">Add a photo</label>
+                        <InputFile id="photo-file" accept="image/png,image/jpeg,image/gif,image/webp" OnChange="PickPhoto" aria-invalid="@Invalid("file")" aria-describedby="@Err("file", "photo-file", "photo-hint")" data-testid="photo-file" />
+                        <span class="field__hint" id="photo-hint">Images only, up to 5 MiB.</span>
+                        <FieldError Errors="@Problem?.For("file")" Id="photo-file-error" />
+                    </div>
+                    <button type="button" class="btn" disabled="@(Busy || _photo is null)" @onclick="UploadPhotoAsync" data-testid="photo-upload">Upload photo</button>
+                }
+
+                <h3>History</h3>
+                @if (_history.Count == 0)
+                {
+                    <p class="muted">No history.</p>
+                }
+                else
+                {
+                    <ul class="timeline" data-testid="incident-history">
+                        @foreach (var h in _history)
+                        {
+                            <li>
+                                <div>@h.Summary@(string.IsNullOrEmpty(h.Reason) ? "" : $" — {h.Reason}")</div>
+                                <div class="timeline__meta">@h.ActorName · @Ui.Utc(h.At) · @h.Action</div>
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+
+            <div class="stack">
+                @if (i.Status == IncidentStatus.Resolved)
+                {
+                    <p class="muted">Resolved incidents are kept as they were.</p>
+                }
+                else
+                {
+                    @if (CanManage)
+                    {
+                        <form class="form action-box" @onsubmit="ResolveAsync" @onsubmit:preventDefault novalidate data-testid="resolve-form">
+                            <h3>Resolve</h3>
+                            <div class="field">
+                                <label for="resolution">Resolution notes</label>
+                                <textarea id="resolution" @bind="_resolution" maxlength="1000" required aria-invalid="@Invalid("resolution")" aria-describedby="@Err("resolution", "resolution", "resolution-hint")" data-testid="resolution"></textarea>
+                                <span class="field__hint" id="resolution-hint">10–1,000 characters. Audited.</span>
+                                <FieldError Errors="@Problem?.For("resolution")" Id="resolution-error" />
+                            </div>
+                            <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="resolve-submit">Resolve incident</button>
+                        </form>
+                    }
+                    @if (CanReport && i.Status == IncidentStatus.Open)
+                    {
+                        <form class="form action-box" @onsubmit="EscalateAsync" @onsubmit:preventDefault novalidate data-testid="escalate-form">
+                            <h3>Escalate to operations management</h3>
+                            <div class="field">
+                                <label for="escalate-reason">Reason</label>
+                                <textarea id="escalate-reason" @bind="_escalateReason" maxlength="1000" required aria-invalid="@Invalid("reason")" aria-describedby="@Err("reason", "escalate-reason", "escalate-hint")" data-testid="escalate-reason"></textarea>
+                                <span class="field__hint" id="escalate-hint">10–1,000 characters. The Operations Manager is notified.</span>
+                                <FieldError Errors="@Problem?.For("reason")" Id="escalate-reason-error" />
+                            </div>
+                            <button type="submit" class="btn" disabled="@Busy" data-testid="escalate-submit">Escalate</button>
+                        </form>
+                    }
+                    @if (CanManage)
+                    {
+                        <form class="form action-box" @onsubmit="UpdateAsync" @onsubmit:preventDefault novalidate data-testid="edit-form">
+                            <h3>Follow-up and corrective action</h3>
+                            <div class="form-grid form-grid--single">
+                                <IncidentFields Model="_editInput" Prefix="edit" Owners="_owners" Problem="Problem" />
+                            </div>
+                            <button type="submit" class="btn" disabled="@Busy" data-testid="edit-submit">Save follow-up</button>
+                        </form>
+                    }
+                    @if (!CanManage && !CanReport)
+                    {
+                        <p class="muted" data-testid="incident-readonly">Read-only: your role can review incidents but not change them.</p>
+                    }
+                }
+            </div>
+        </div>
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "severity")] public string? SeverityQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "status")] public string? StatusQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "from")] public string? FromQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "id")] public Guid? SelectedId { get; set; }
+
+    private IReadOnlyList<IncidentRow>? _rows;
+    private int _total;
+    private IReadOnlyList<CemeteryOption> _cemeteries = [];
+    private IReadOnlyList<StaffOption> _owners = [];
+    private IReadOnlyList<IncidentTarget> _targets = [];
+    private IReadOnlyList<ClosureRow>? _closure;
+    private Incident? _incident;
+    private IReadOnlyList<AttachmentView> _photos = [];
+    private IReadOnlyList<AuditEvent> _history = [];
+    private string _caseReference = "";
+    private bool _showForm;
+    private string _newTarget = "";
+    private IncidentFields.Input _newInput = new();
+    private IncidentFields.Input _editInput = new();
+    private string _resolution = "";
+    private string _escalateReason = "";
+    private UploadFile? _photo;
+    private IReadOnlyList<ConflictPanel.Row>? _conflict;
+    private Func<Task>? _reapply;
+
+    private string _fSeverity = "", _fStatus = "", _fCemetery = "";
+    private DateOnly? _fFrom, _fTo;
+
+    private int Page => Math.Max(1, PageQuery ?? 1);
+    private bool CanReport => Me?.Can(Cap.ReportIncidents) == true;
+    private bool CanManage => Me?.Can(Cap.ManageIncidents) == true;
+    private bool IsAttendantOnly => Me?.Has(Roles.EventAttendant) == true && Me?.Has(Roles.OperationsManager) != true;
+    private bool HasFilters => SeverityQuery is not null || StatusQuery is not null || CemeteryQuery is not null || FromQuery is not null || ToQuery is not null;
+
+    private string LeadText => CanManage
+        ? "Incidents at events: follow up, escalate, resolve, and close completed cases."
+        : CanReport ? "Log incidents for your assigned events, add photos and escalate when needed." : "Incidents, follow-up and resolution (read-only).";
+
+    private IncidentFilter Filter => new(
+        Enum.TryParse<IncidentSeverity>(SeverityQuery, out var sev) ? sev : null,
+        Enum.TryParse<IncidentStatus>(StatusQuery, out var st) ? st : null,
+        CemeteryQuery, ParseDate(FromQuery), ParseDate(ToQuery), Page);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _fSeverity = SeverityQuery ?? "";
+        _fStatus = StatusQuery ?? "";
+        _fCemetery = CemeteryQuery?.ToString() ?? "";
+        _fFrom = ParseDate(FromQuery);
+        _fTo = ParseDate(ToQuery);
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await LoadAsync(async actor =>
+        {
+            if (_cemeteries.Count == 0) _cemeteries = await Ops.CemeteriesAsync(actor);
+            if (_owners.Count == 0) _owners = await Ops.ManagersAsync(actor);
+            (_rows, _total) = await IncidentSvc.ListAsync(actor, Filter);
+            _closure = actor.Can(Cap.CloseCases) ? await Ops.ClosureQueueAsync(actor) : null;
+            await LoadDetailAsync(actor);
+        });
+    }
+
+    private async Task LoadDetailAsync(Actor actor)
+    {
+        _conflict = null;
+        if (SelectedId is not { } id)
+        {
+            _incident = null;
+            return;
+        }
+        var keepEdits = _incident?.Id == id;
+        (_incident, _photos, _history, _caseReference) = await IncidentSvc.GetAsync(actor, id);
+        if (!keepEdits)
+        {
+            _resolution = "";
+            _escalateReason = "";
+            _photo = null;
+        }
+        _editInput = IncidentFields.Input.From(_incident);
+    }
+
+    private async Task ReloadDetailAsync()
+    {
+        Problem = null;
+        await LoadAsync(LoadDetailAsync);
+    }
+
+    private async Task ToggleForm()
+    {
+        _showForm = !_showForm;
+        Problem = null;
+        if (_showForm) await LoadAsync(async actor => _targets = await IncidentSvc.TargetsAsync(actor));
+    }
+
+    private async Task ApplyFilters()
+    {
+        if (_fFrom is { } f && _fTo is { } t && f > t)
+        {
+            await RunAsync(_ => throw ValidationException.For("from", "The start date must be on or before the end date."));
+            return;
+        }
+        Nav.NavigateTo(Link(1, null, _fSeverity, _fStatus, _fCemetery, _fFrom, _fTo));
+    }
+
+    private string Link(int page, Guid? id) => Link(page, id, SeverityQuery, StatusQuery, CemeteryQuery?.ToString(), ParseDate(FromQuery), ParseDate(ToQuery));
+
+    private static string Link(int page, Guid? id, string? severity, string? status, string? cemetery, DateOnly? from, DateOnly? to)
+    {
+        var q = new List<string>();
+        if (!string.IsNullOrEmpty(severity)) q.Add($"severity={severity}");
+        if (!string.IsNullOrEmpty(status)) q.Add($"status={status}");
+        if (!string.IsNullOrEmpty(cemetery)) q.Add($"cemetery={cemetery}");
+        if (from is { } f) q.Add($"from={f:yyyy-MM-dd}");
+        if (to is { } t) q.Add($"to={t:yyyy-MM-dd}");
+        if (page > 1) q.Add($"page={page}");
+        if (id is { } i) q.Add($"id={i}");
+        return "/incidents" + (q.Count > 0 ? "?" + string.Join("&", q) : "");
+    }
+
+    private async Task CreateAsync()
+    {
+        var target = _targets.FirstOrDefault(t => t.ApplicationId.ToString() == _newTarget);
+        Guid created = default;
+        var ok = await RunAsync(async actor =>
+        {
+            var errors = _newInput.ClientErrors();
+            if (target is null) errors["applicationId"] = ["Choose the event the incident happened at."];
+            if (errors.Count > 0) throw new ValidationException(errors);
+            created = await IncidentSvc.CreateAsync(actor, target!.ApplicationId, target.Version, _newInput.ToInput());
+        }, "Incident logged.");
+        if (!ok)
+        {
+            if (Problem?.StatusCode == 409) await LoadAsync(async actor => _targets = await IncidentSvc.TargetsAsync(actor));
+            return;
+        }
+        _showForm = false;
+        _newInput = new();
+        _newTarget = "";
+        Nav.NavigateTo(Link(1, created, null, null, null, null, null));
+    }
+
+    private async Task UpdateAsync()
+    {
+        if (_incident is null) return;
+        var mine = _editInput.Clone();
+        var version = _incident.Version;
+        _reapply = async () =>
+        {
+            _editInput = mine;
+            await RunUpdate(mine, _incident!.Version);
+        };
+        await RunUpdate(mine, version);
+    }
+
+    private async Task RunUpdate(IncidentFields.Input mine, uint version)
+    {
+        var ok = await RunAsync(async actor =>
+        {
+            var errors = mine.ClientErrors();
+            if (errors.Count > 0) throw new ValidationException(errors);
+            await IncidentSvc.UpdateAsync(actor, _incident!.Id, version, mine.ToInput());
+        }, "Follow-up saved.");
+        await AfterWriteAsync(ok, () =>
+        [
+            new("Category", _incident!.Category, mine.Category),
+            new("Severity", _incident.Severity.ToString(), mine.Severity),
+            new("Description", _incident.Description, mine.Description),
+            new("Follow-up owner", _incident.OwnerName, _owners.FirstOrDefault(o => o.UserId == mine.OwnerUserId)?.DisplayName),
+            new("Due date", _incident.DueDate?.ToString("yyyy-MM-dd"), mine.DueDate?.ToString("yyyy-MM-dd")),
+            new("Corrective action", _incident.CorrectiveAction, mine.CorrectiveAction),
+        ], restore: () => _editInput = mine);
+    }
+
+    private async Task EscalateAsync()
+    {
+        if (_incident is null) return;
+        var reason = _escalateReason;
+        _reapply = EscalateAsync;
+        var ok = await RunAsync(async actor =>
+        {
+            if (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length < Limits.ReasonMin)
+                throw ValidationException.For("reason", $"Escalation reason must be at least {Limits.ReasonMin} characters.");
+            await IncidentSvc.EscalateAsync(actor, _incident!.Id, _incident.Version, reason);
+        }, "Incident escalated. Operations management has been notified.");
+        if (ok) _escalateReason = "";
+        await AfterWriteAsync(ok, () => [new("Status", _incident!.Status.ToString(), "Escalated")]);
+    }
+
+    private async Task ResolveAsync()
+    {
+        if (_incident is null) return;
+        var resolution = _resolution;
+        _reapply = ResolveAsync;
+        var ok = await RunAsync(async actor =>
+        {
+            if (string.IsNullOrWhiteSpace(resolution) || resolution.Trim().Length < Limits.ReasonMin)
+                throw ValidationException.For("resolution", $"Resolution must be at least {Limits.ReasonMin} characters.");
+            await IncidentSvc.ResolveAsync(actor, _incident!.Id, _incident.Version, resolution);
+        }, "Incident resolved.");
+        if (ok) _resolution = "";
+        await AfterWriteAsync(ok, () => [new("Status", _incident!.Status.ToString(), "Resolved")]);
+    }
+
+    private async Task PickPhoto(InputFileChangeEventArgs e)
+    {
+        Problem = null;
+        _photo = null;
+        var file = e.File;
+        if (file.Size > Limits.MaxAttachmentBytes)
+        {
+            await RunAsync(_ => throw ValidationException.For("file", "The photo is larger than 5 MiB."));
+            return;
+        }
+        using var buffer = new MemoryStream();
+        await file.OpenReadStream(Limits.MaxAttachmentBytes).CopyToAsync(buffer);
+        _photo = new UploadFile(file.Name, file.ContentType, buffer.ToArray());
+    }
+
+    private async Task UploadPhotoAsync()
+    {
+        if (_incident is null) return;
+        var photo = _photo;
+        _reapply = UploadPhotoAsync;
+        var ok = await RunAsync(async actor =>
+        {
+            if (photo is null) throw ValidationException.For("file", "Choose a photo to upload.");
+            await IncidentSvc.AddPhotoAsync(actor, _incident!.Id, _incident.Version, photo);
+        }, "Photo added.");
+        if (ok) _photo = null;
+        await AfterWriteAsync(ok, () => [new("Photos", Ui.Plural(_photos.Count, "photo", "photos"), $"Add {photo?.FileName}")]);
+    }
+
+    private async Task OpenPhotoAsync(Guid attachmentId)
+    {
+        SignedLink? link = null;
+        if (await RunAsync(async actor => link = await FileSvc.IssueLinkAsync(actor, attachmentId)) && link is not null)
+            Nav.NavigateTo(link.Url, forceLoad: true);
+    }
+
+    private async Task CloseCaseAsync(ClosureRow row)
+    {
+        var ok = await RunAsync(async actor => await Ops.CloseAsync(actor, row.ApplicationId, row.Version, "Closed from the Incident Register."), $"{row.Reference} closed.");
+        if (ok || Problem?.StatusCode == 409)
+        {
+            var problem = Problem;
+            await LoadAsync(async actor => _closure = await Ops.ClosureQueueAsync(actor));
+            Problem = problem;
+        }
+    }
+
+    /// <summary>Reloads after a write; on 409 shows saved values beside the caller's (kept) input.</summary>
+    private async Task AfterWriteAsync(bool ok, Func<IReadOnlyList<ConflictPanel.Row>> rows, Action? restore = null)
+    {
+        var problem = Problem;
+        if (ok || problem?.StatusCode == 409)
+        {
+            await LoadAsync(async actor =>
+            {
+                (_rows, _total) = await IncidentSvc.ListAsync(actor, Filter);
+                _closure = actor.Can(Cap.CloseCases) ? await Ops.ClosureQueueAsync(actor) : null;
+                await LoadDetailAsync(actor);
+            });
+        }
+        if (!ok && problem is not null)
+        {
+            Problem = problem;
+            if (problem.StatusCode == 409 && _incident is not null)
+            {
+                _conflict = rows();
+                restore?.Invoke();
+            }
+        }
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflict = null;
+        if (_reapply is { } again) await again();
+    }
+
+    private string? Err(string field, string id, string? hint = null)
+    {
+        var parts = new List<string>();
+        if (hint is not null) parts.Add(hint);
+        if (Invalid(field) is not null) parts.Add($"{id}-error");
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    private static DateOnly? ParseDate(string? text) => DateOnly.TryParseExact(text, "yyyy-MM-dd", out var d) ? d : null;
+
+    private static string StatusCss(IncidentStatus s) => s switch
+    {
+        IncidentStatus.Open => "chip--attention",
+        IncidentStatus.Escalated => "chip--bad",
+        _ => "chip--good",
+    };
+}

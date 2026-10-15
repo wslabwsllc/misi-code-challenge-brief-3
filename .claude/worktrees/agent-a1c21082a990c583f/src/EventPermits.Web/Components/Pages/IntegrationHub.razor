@@ -1,0 +1,345 @@
+@page "/integrations"
+@attribute [Authorize(Policy = Cap.ViewIntegrations)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject IntegrationHubService Hub
+@inject ICircuitStates Circuits
+
+<PageTitle>Integration Hub · Memorial Event Operations</PageTitle>
+<PageHeader Title="External Integration Hub" Lead="Health, traffic and recent failures of every external system. Configuration is shown with secrets masked; tests make real, recorded calls.">
+    <Actions>
+        <button type="button" class="btn" @onclick="RefreshAsync" disabled="@Busy" data-testid="hub-refresh">Refresh</button>
+    </Actions>
+</PageHeader>
+<ProblemAlert Problem="Problem" OnRetry="RefreshAsync" />
+<LiveRegion Message="@Announcement" />
+
+@if (Loading && _cards is null)
+{
+    <p class="muted" role="status">Checking integrations…</p>
+}
+else if (_cards is not null)
+{
+    <section aria-labelledby="cards-title">
+        <h2 id="cards-title">Services</h2>
+        <ul class="hub-cards" role="list">
+            @foreach (var c in _cards)
+            {
+                var circuit = Circuits.StateOf(c.Kind);
+                <li class="card hub-card hub-card--@c.Health.ToString().ToLowerInvariant()" data-testid="@($"hub-card-{c.Kind}")">
+                    <div class="hub-card__head">
+                        <h3>@c.Name</h3>
+                        <span class="chip @HealthClass(c.Health)" data-testid="@($"hub-health-{c.Kind}")">@c.Health</span>
+                    </div>
+                    <p class="hub-card__reason">@c.HealthReason</p>
+                    <dl class="hub-facts">
+                        <div><dt>Requests (24 h)</dt><dd data-testid="@($"hub-requests-{c.Kind}")">@c.Requests24h.ToString("N0", Ui.Culture)</dd></div>
+                        <div><dt>Failures (24 h)</dt><dd>@c.Failures24h.ToString("N0", Ui.Culture)</dd></div>
+                        <div><dt>Last success</dt><dd>@(c.LastSuccess is { } s ? Ui.Utc(s) : "Never")</dd></div>
+                        <div><dt>Last request</dt><dd>@(c.LastRequest is { } r ? Ui.Utc(r) : "Never")</dd></div>
+                        @if (c.Kind is not (IntegrationKind.ObjectStorage or IntegrationKind.PartnerFeed))
+                        {
+                            <div><dt>Circuit breaker</dt><dd data-testid="@($"hub-circuit-{c.Kind}")">@CircuitText(circuit)</dd></div>
+                        }
+                    </dl>
+                    <details class="hub-config">
+                        <summary>Configuration</summary>
+                        <dl class="dl hub-config__dl">
+                            <dt>Endpoint</dt><dd class="mono hub-wrap">@(string.IsNullOrWhiteSpace(c.Config.BaseUrl) ? "Not configured" : c.Config.BaseUrl)</dd>
+                            @foreach (var (key, value) in c.Config.Masked)
+                            {
+                                <dt>@key</dt><dd class="mono hub-wrap">@value</dd>
+                            }
+                        </dl>
+                    </details>
+                    @if (c.RecentErrors.Count > 0)
+                    {
+                        <details class="hub-errors">
+                            <summary>Recent errors (@c.RecentErrors.Count)</summary>
+                            <ul role="list">
+                                @foreach (var e in c.RecentErrors.Take(5))
+                                {
+                                    <li>
+                                        <a href="@($"/integrations/attempts/{e.Id}")">@Ui.Utc(e.At)</a>
+                                        <span class="muted">@e.Operation · @(e.StatusCode?.ToString(Ui.Culture) ?? e.Outcome.ToString())</span>
+                                    </li>
+                                }
+                            </ul>
+                        </details>
+                    }
+                    @if (_tests.TryGetValue(c.Kind, out var t))
+                    {
+                        <div class="alert @(t.Ok ? "alert--success" : "alert--warning") hub-test" data-testid="@($"hub-test-result-{c.Kind}")">
+                            <p class="alert__title"><span class="alert__icon" aria-hidden="true">@(t.Ok ? "✓" : "!")</span><strong>@(t.Ok ? "Connection OK" : "Connection failed")</strong> <span class="muted">in @t.DurationMs.ToString("N0", Ui.Culture) ms</span></p>
+                            <p>@t.Message</p>
+                            @if (t.AttemptId is { } aid)
+                            {
+                                <p><a href="@($"/integrations/attempts/{aid}")" data-testid="@($"hub-test-attempt-{c.Kind}")">View the recorded attempt</a></p>
+                            }
+                        </div>
+                    }
+                    <div class="row hub-card__actions">
+                        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => TestAsync(c.Kind)" data-testid="@($"hub-test-{c.Kind}")">Test connection<span class="visually-hidden"> to @c.Name</span></button>
+                        <a class="btn btn--small btn--quiet" href="@c.DetailPage">Open page<span class="visually-hidden"> for @c.Name</span></a>
+                    </div>
+                </li>
+            }
+        </ul>
+    </section>
+
+    @if (Me?.Can(Cap.ManageIntegrations) == true)
+    {
+        <section class="card card--flush" aria-labelledby="scenario-title" data-testid="scenario-panel">
+            <div class="hub-section-head">
+                <h2 id="scenario-title">Scenario panel</h2>
+                <p class="muted">Switch each mock service into a failure mode to demonstrate the behaviour above. Changes are audited. Call counts come from the mocks themselves.</p>
+            </div>
+            @if (_scenarios is null)
+            {
+                <p class="muted hub-pad" role="status">Loading mock scenarios…</p>
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="table table--cards">
+                        <caption class="visually-hidden">Mock services, their current mode and call counts</caption>
+                        <thead><tr><th scope="col">Mock service</th><th scope="col">Current mode</th><th scope="col">Change mode</th><th scope="col" class="num">Calls</th><th scope="col">Reset</th></tr></thead>
+                        <tbody>
+                            @foreach (var s in _scenarios)
+                            {
+                                var selectId = $"mode-{s.Kind}";
+                                var errorId = $"mode-{s.Kind}-error";
+                                <tr data-testid="@($"scenario-{s.Kind}")">
+                                    <th scope="row" data-label="Mock service">@s.Name</th>
+                                    <td data-label="Current mode">
+                                        @if (s.Error is not null)
+                                        {
+                                            <span class="chip chip--bad">Unreachable</span> <span class="muted">@s.Error</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="chip @(s.Mode == "normal" ? "chip--good" : "chip--attention")" data-testid="@($"scenario-mode-{s.Kind}")">@s.Mode</span>
+                                        }
+                                    </td>
+                                    <td data-label="Change mode">
+                                        <form class="hub-mode" @onsubmit="() => SetModeAsync(s.Kind)" @onsubmit:preventDefault novalidate>
+                                            <label for="@selectId" class="visually-hidden">New mode for @s.Name</label>
+                                            <select id="@selectId" value="@ModeChoice(s.Kind)" @onchange="e => _choices[s.Kind] = e.Value?.ToString() ?? string.Empty"
+                                                    aria-invalid="@(_modeErrorKind == s.Kind ? Invalid("mode") : null)" aria-describedby="@errorId" data-testid="@($"scenario-select-{s.Kind}")">
+                                                <option value="">Choose a mode</option>
+                                                @foreach (var m in s.Modes)
+                                                {
+                                                    <option value="@m">@m</option>
+                                                }
+                                            </select>
+                                            <button type="submit" class="btn btn--small" disabled="@Busy" data-testid="@($"scenario-apply-{s.Kind}")">Apply<span class="visually-hidden"> mode to @s.Name</span></button>
+                                            <span id="@errorId" class="field__error">@(_modeErrorKind == s.Kind ? string.Join(" ", Problem?.For("mode") ?? []) : null)</span>
+                                        </form>
+                                    </td>
+                                    <td data-label="Calls" class="num">
+                                        <span data-testid="@($"scenario-calls-{s.Kind}")">@(s.Calls?.ToString("N0", Ui.Culture) ?? "—")</span>
+                                        @if (s.ByEndpoint.Count > 0)
+                                        {
+                                            <details class="hub-endpoints">
+                                                <summary>By endpoint</summary>
+                                                <ul role="list">
+                                                    @foreach (var (endpoint, count) in s.ByEndpoint.OrderByDescending(x => x.Value))
+                                                    {
+                                                        <li><span class="mono">@endpoint</span> @count.ToString("N0", Ui.Culture)</li>
+                                                    }
+                                                </ul>
+                                            </details>
+                                        }
+                                    </td>
+                                    <td data-label="Reset">
+                                        <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ResetAsync(s.Kind)" data-testid="@($"scenario-reset-{s.Kind}")">Reset<span class="visually-hidden"> @s.Name</span></button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    }
+
+    <section class="card card--flush hub-attempts" aria-labelledby="attempts-title" data-testid="hub-attempts">
+        <div class="hub-section-head">
+            <h2 id="attempts-title">Recent attempts</h2>
+            <p class="muted">One row per HTTP attempt, retries included. Open a row for its sanitised request and response.</p>
+        </div>
+        <form class="filters hub-filters" @onsubmit="FilterAsync" @onsubmit:preventDefault novalidate>
+            <div class="field">
+                <label for="att-kind">Integration</label>
+                <select id="att-kind" @bind="_kind" data-testid="attempts-kind">
+                    <option value="">All</option>
+                    @foreach (var k in Enum.GetValues<IntegrationKind>().Where(k => k is not (IntegrationKind.ObjectStorage or IntegrationKind.PartnerFeed)))
+                    {
+                        <option value="@k">@k</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="att-outcome">Outcome</label>
+                <select id="att-outcome" @bind="_outcome" data-testid="attempts-outcome">
+                    <option value="">All</option>
+                    @foreach (var o in Enum.GetValues<AttemptOutcome>())
+                    {
+                        <option value="@o">@o</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="att-corr">Correlation ID</label>
+                <input id="att-corr" @bind="_correlation" maxlength="64" autocomplete="off" data-testid="attempts-correlation" />
+            </div>
+            <div class="field">
+                <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="attempts-filter">Filter attempts</button>
+            </div>
+        </form>
+        @if (_attempts.Count == 0)
+        {
+            <div class="hub-pad"><EmptyState Title="No attempts match">
+                <p>Run "Test connection" on a service, or clear the filters.</p>
+            </EmptyState></div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards table--compact">
+                    <caption class="visually-hidden">Integration attempts, newest first</caption>
+                    <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Integration</th><th scope="col">Operation</th><th scope="col">Result</th><th scope="col" class="num">Duration</th><th scope="col" class="num">Attempt</th><th scope="col">Request ID</th></tr></thead>
+                    <tbody>
+                        @foreach (var a in _attempts)
+                        {
+                            <tr data-testid="attempt-row">
+                                <td data-label="Time (UTC)">@Ui.Utc(a.At)</td>
+                                <td data-label="Integration">@a.Integration</td>
+                                <td data-label="Operation">@a.Operation</td>
+                                <td data-label="Result"><span class="chip @OutcomeClass(a.Outcome)">@a.Outcome@(a.StatusCode is { } sc ? $" · {sc}" : "")</span></td>
+                                <td data-label="Duration" class="num">@a.DurationMs.ToString("N0", Ui.Culture) ms</td>
+                                <td data-label="Attempt" class="num">@a.AttemptNumber</td>
+                                <td data-label="Request ID"><a class="mono" href="@($"/integrations/attempts/{a.Id}")" data-testid="attempt-link">@a.RequestId</a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="_page" Total="_total" OnPage="PageAsync" />
+        }
+    </section>
+}
+
+@code {
+    private IReadOnlyList<IntegrationCard>? _cards;
+    private IReadOnlyList<ScenarioView>? _scenarios;
+    private IReadOnlyList<IntegrationAttempt> _attempts = [];
+    private int _total;
+    private int _page = 1;
+    private string _kind = "";
+    private string _outcome = "";
+    private string _correlation = "";
+    private readonly Dictionary<IntegrationKind, ConnectionTest> _tests = [];
+    private readonly Dictionary<IntegrationKind, string> _choices = [];
+    private IntegrationKind? _modeErrorKind;
+
+    protected override Task OnInitializedAsync() => LoadAsync(LoadAllAsync);
+
+    private async Task LoadAllAsync(Actor actor)
+    {
+        _cards = await Hub.CardsAsync(actor);
+        await LoadAttemptsAsync(actor);
+        if (actor.Can(Cap.ManageIntegrations)) _scenarios = await Hub.ScenariosAsync(actor);
+    }
+
+    private async Task LoadAttemptsAsync(Actor actor)
+    {
+        IntegrationKind? kind = Enum.TryParse<IntegrationKind>(_kind, out var k) ? k : null;
+        AttemptOutcome? outcome = Enum.TryParse<AttemptOutcome>(_outcome, out var o) ? o : null;
+        (_attempts, _total) = await Hub.AttemptsAsync(actor, kind, outcome, _correlation, _page);
+    }
+
+    private async Task RefreshAsync()
+    {
+        _modeErrorKind = null;
+        await RunAsync(LoadAllAsync, "Integration status refreshed.");
+    }
+
+    private async Task TestAsync(IntegrationKind kind)
+    {
+        _modeErrorKind = null;
+        ConnectionTest? result = null;
+        await RunAsync(async actor =>
+        {
+            result = await Hub.TestAsync(actor, kind);
+            _tests[kind] = result;
+            await LoadAllAsync(actor);
+        });
+        if (result is not null) Announcement = $"{kind} connection test {(result.Ok ? "succeeded" : "failed")}: {result.Message}";
+    }
+
+    private async Task SetModeAsync(IntegrationKind kind)
+    {
+        _modeErrorKind = kind;
+        var mode = ModeChoice(kind);
+        if (await RunAsync(async actor =>
+            {
+                await Hub.SetScenarioAsync(actor, kind, mode);
+                _scenarios = await Hub.ScenariosAsync(actor);
+            }, $"{kind} mock switched to {mode}."))
+        {
+            _modeErrorKind = null;
+            _choices.Remove(kind);
+        }
+    }
+
+    private async Task ResetAsync(IntegrationKind kind)
+    {
+        _modeErrorKind = null;
+        await RunAsync(async actor =>
+        {
+            await Hub.ResetMockAsync(actor, kind);
+            _scenarios = await Hub.ScenariosAsync(actor);
+        }, $"{kind} mock reset to normal with counters cleared.");
+    }
+
+    private async Task FilterAsync()
+    {
+        _page = 1;
+        await RunAsync(LoadAttemptsAsync);
+    }
+
+    private async Task PageAsync(int page)
+    {
+        _page = page;
+        await RunAsync(LoadAttemptsAsync);
+    }
+
+    private string ModeChoice(IntegrationKind kind) => _choices.TryGetValue(kind, out var m) ? m : "";
+
+    private static string HealthClass(IntegrationHealth h) => h switch
+    {
+        IntegrationHealth.Healthy => "chip--good",
+        IntegrationHealth.Degraded => "chip--attention",
+        IntegrationHealth.Offline => "chip--bad",
+        _ => "chip--draft",
+    };
+
+    private static string OutcomeClass(AttemptOutcome o) => o switch
+    {
+        AttemptOutcome.Success => "chip--good",
+        AttemptOutcome.ClientError => "chip--attention",
+        _ => "chip--bad",
+    };
+
+    private static string CircuitText(string? state) => state switch
+    {
+        null => "Not used since start-up",
+        "Closed" => "Closed (calls flow)",
+        "Open" => "Open (calls short-circuited)",
+        "HalfOpen" => "Half-open (probing)",
+        "Isolated" => "Isolated (manually held open)",
+        _ => state,
+    };
+}

@@ -1,0 +1,597 @@
+@page "/reviews"
+@attribute [Authorize(Policy = Cap.ReviewEligibility)]
+@rendermode InteractiveServer
+@inherits DecisionPage
+@using EventPermits.Application.Services
+@inject ReviewService Reviews
+@inject CaseService Cases
+
+<PageTitle>Eligibility Review Queue · Memorial Event Operations</PageTitle>
+<PageHeader Title="Eligibility Review Queue"
+            Lead="Submitted applications, oldest first. Open one to check its documents, event rules and registry evidence, then mark it eligible, ask for information or reject it." />
+<LiveRegion Message="@Announcement" />
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+
+@if (_ws is not null)
+{
+    var c = _ws.Case;
+    var latest = _ws.Verifications.FirstOrDefault();
+    <section class="card review" aria-labelledby="review-title" data-testid="review-workspace" data-case="@c.Reference">
+        <div class="row row--between">
+            <h2 id="review-title" tabindex="-1">Review @c.Reference</h2>
+            <a class="btn btn--small" href="@QueueUrl(null)" data-testid="review-close">Back to the queue</a>
+        </div>
+        <p class="row">
+            <StatusChip Status="c.Status" />
+            <span class="muted">Submitted @(c.SubmittedAt is { } s ? Ui.Utc(s) : "—") by @c.OwnerName · record version @c.Version</span>
+            <a href="/applications/@c.Id">Open the full case</a>
+        </p>
+        @if (_autoVerifyNote is not null)
+        {
+            <p class="notice" role="status" data-testid="auto-verify-note">@_autoVerifyNote</p>
+        }
+        @if (IsConflict && ConflictRows is not null)
+        {
+            <ConflictPanel Rows="ConflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyAsync" />
+        }
+
+        <div class="split">
+            <div class="stack">
+                <section aria-labelledby="facts-title">
+                    <h3 id="facts-title">Applicant and event</h3>
+                    <dl class="dl">
+                        <dt>Applicant</dt><dd>@c.Applicant.FullName @(string.IsNullOrEmpty(c.Applicant.Organization) ? "" : $"· {c.Applicant.Organization}")</dd>
+                        <dt>Contact</dt><dd>@Join(c.Applicant.Email, c.Applicant.Phone)</dd>
+                        <dt>Registry reference</dt><dd><code>@(string.IsNullOrEmpty(c.Applicant.RegistryReference) ? "none given" : c.Applicant.RegistryReference)</code></dd>
+                        <dt>Event</dt><dd>@c.Event.Title</dd>
+                        <dt>Category</dt><dd>@(c.Event.CategoryName ?? "—")</dd>
+                        <dt>Venue</dt><dd>@(c.Event.VenueName ?? "—") @(c.Event.CemeteryName is { } cem ? $"· {cem}" : "")</dd>
+                        <dt>When</dt><dd>@(c.Event.StartUtc is { } st ? Local(st, c.Event.TimeZoneId) : "—") · @(c.Event.DurationMinutes?.ToString() ?? "—") min</dd>
+                        <dt>Attendees</dt><dd>@(c.Event.AttendeeCount?.ToString() ?? "—") @(c.Event.VenueCapacity is { } cap ? $"(venue capacity {cap})" : "")</dd>
+                        <dt>Special needs</dt><dd>@(string.IsNullOrWhiteSpace(c.Event.SpecialNeeds) ? "None stated" : c.Event.SpecialNeeds)</dd>
+                        @if (!string.IsNullOrWhiteSpace(c.Event.Description))
+                        {
+                            <dt>Description</dt><dd>@c.Event.Description</dd>
+                        }
+                    </dl>
+                </section>
+
+                <section aria-labelledby="docs-title">
+                    <h3 id="docs-title">Documents</h3>
+                    <p class="muted">Required for @(c.Event.CategoryName ?? "this category"): @(c.Event.RequiredDocuments.Count == 0 ? "none" : string.Join(", ", c.Event.RequiredDocuments.Select(DocName))).</p>
+                    @if (c.Documents.Count == 0)
+                    {
+                        <EmptyState Title="No documents uploaded">Ask the coordinator for the required documents with an information request.</EmptyState>
+                    }
+                    else
+                    {
+                        <ul class="doc-list" data-testid="review-documents">
+                            @foreach (var d in c.Documents)
+                            {
+                                <li>
+                                    <strong>@d.FileName</strong>
+                                    <span class="muted">@DocName(d.DocumentType) · @(d.SizeBytes.ToString("N0", Ui.Culture)) bytes · uploaded @Ui.Utc(d.UploadedAt) by @d.UploadedBy</span>
+                                    <FileLink AttachmentId="d.Id" FileName="@d.FileName" CanDownload="d.CanDownload" />
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+
+                @if (c.InformationRequests.Count > 0 || c.Reviews.Count > 0)
+                {
+                    <section aria-labelledby="history-title">
+                        <h3 id="history-title">Earlier review activity</h3>
+                        <ul class="timeline" data-testid="review-history">
+                            @foreach (var r in c.Reviews)
+                            {
+                                <li>
+                                    <strong>@ReviewLabel(r.Decision)</strong> by @r.ReviewerName
+                                    @if (!string.IsNullOrEmpty(r.Reason))
+                                    {
+                                        <span>: @r.Reason</span>
+                                    }
+                                    @if (r.RegistryOverride)
+                                    {
+                                        <span class="tag">Registry override: @r.OverrideReason</span>
+                                    }
+                                    <div class="timeline__meta">@Ui.Utc(r.CreatedAt)</div>
+                                </li>
+                            }
+                            @foreach (var ir in c.InformationRequests)
+                            {
+                                <li>
+                                    <strong>Information request</strong> (@(ir.Status == InformationRequestStatus.Open ? "open" : "answered")): @string.Join("; ", ir.MissingItems)
+                                    @if (ir.ResponseText is not null)
+                                    {
+                                        <div>Response: @ir.ResponseText</div>
+                                    }
+                                    <div class="timeline__meta">Due @ir.DueDate.ToString("d MMM yyyy", Ui.Culture) · asked by @ir.RequestedByName @Ui.Utc(ir.CreatedAt)</div>
+                                </li>
+                            }
+                        </ul>
+                    </section>
+                }
+            </div>
+
+            <div class="stack">
+                <section class="evidence" aria-labelledby="registry-title" data-testid="registry-evidence">
+                    <h3 id="registry-title">Registry evidence</h3>
+                    @if (latest is null)
+                    {
+                        <p>No registry check yet. Eligibility cannot pass without evidence.</p>
+                    }
+                    else
+                    {
+                        <p class="row"><RegistryChip Outcome="latest.Outcome" Eligibility="latest.Eligibility" /> <span>@latest.Detail</span></p>
+                        <dl class="dl">
+                            <dt>Reference</dt><dd><code>@latest.Reference</code></dd>
+                            <dt>Matched name</dt><dd>@(latest.MatchedName ?? "—")</dd>
+                            <dt>Checked</dt><dd>@Ui.Utc(latest.CreatedAt) by @latest.RequestedBy</dd>
+                            @if (latest.AttemptId is { } attempt)
+                            {
+                                <dt>Call record</dt><dd><a href="/integrations/attempts/@attempt">Integration attempt</a></dd>
+                            }
+                        </dl>
+                    }
+                    <p class="muted" data-testid="override-guidance">@OverrideGuidance(latest)</p>
+                    <button type="button" class="btn" disabled="@Busy" @onclick="VerifyAsync" data-testid="verify-registry">
+                        @(latest?.Outcome == VerificationOutcome.Pending ? "Retry verification" : latest is null ? "Verify with the registry" : "Verify again")
+                    </button>
+                    @if (_ws.Verifications.Count > 1)
+                    {
+                        <details>
+                            <summary>Earlier checks (@(_ws.Verifications.Count - 1))</summary>
+                            <ul>
+                                @foreach (var v in _ws.Verifications.Skip(1))
+                                {
+                                    <li>@Ui.Utc(v.CreatedAt): <RegistryChip Outcome="v.Outcome" Eligibility="v.Eligibility" /> @v.Detail</li>
+                                }
+                            </ul>
+                        </details>
+                    }
+                </section>
+
+                <form class="form decision" @onsubmit="SubmitAsync" novalidate data-testid="decision-form" aria-labelledby="decision-title">
+                    <h3 id="decision-title">Decision</h3>
+                    <fieldset>
+                        <legend>Checklist for @(c.Event.CategoryName ?? "this application")</legend>
+                        @for (var i = 0; i < _ws.Checklist.Count; i++)
+                        {
+                            var index = i;
+                            <div class="check">
+                                <input type="checkbox" id="chk-@index" checked="@_checks[index]" @onchange="e => _checks[index] = e.Value is true"
+                                       aria-invalid="@(Errors("checklist").Count > 0 && !_checks[index] ? "true" : null)" aria-describedby="@Describe("checklist", "checklist")"
+                                       data-testid="checklist-item" />
+                                <label for="chk-@index">@_ws.Checklist[index]</label>
+                            </div>
+                        }
+                        <FieldError Problem="Problem" Field="checklist" Id="checklist" />
+                    </fieldset>
+
+                    <fieldset>
+                        <legend>Outcome</legend>
+                        <div class="check"><input type="radio" id="d-eligible" name="decision" checked="@(_decision == "eligible")" @onchange="@(() => Choose("eligible"))" data-testid="decision-eligible" /><label for="d-eligible">Mark eligible (T4)</label></div>
+                        <div class="check"><input type="radio" id="d-info" name="decision" checked="@(_decision == "info")" @onchange="@(() => Choose("info"))" data-testid="decision-info" /><label for="d-info">Request information (T2)</label></div>
+                        <div class="check"><input type="radio" id="d-reject" name="decision" checked="@(_decision == "reject")" @onchange="@(() => Choose("reject"))" data-testid="decision-reject" /><label for="d-reject">Reject (T5)</label></div>
+                    </fieldset>
+
+                    @if (_decision == "eligible" && OverrideNeed(latest) is not null)
+                    {
+                        <div class="field">
+                            <label for="override-reason">Registry override reason</label>
+                            <textarea id="override-reason" @bind="_overrideReason" aria-invalid="@Invalid("overrideReason")" aria-describedby="@Describe("overrideReason", "override-reason", hint: true)" data-testid="override-reason"></textarea>
+                            <span class="field__hint" id="override-reason-hint">At least @Limits.OverrideReasonMin characters. Recorded in the audit trail with your name (A-10).</span>
+                            <FieldError Problem="Problem" Field="overrideReason" Id="override-reason" />
+                        </div>
+                    }
+                    @if (_decision == "info")
+                    {
+                        <div class="field">
+                            <label for="info-items">Missing items</label>
+                            <textarea id="info-items" @bind="_items" aria-invalid="@Invalid("items")" aria-describedby="@Describe("items", "info-items", hint: true)" data-testid="info-items"></textarea>
+                            <span class="field__hint" id="info-items-hint">One item per line, up to 200 characters each.</span>
+                            <FieldError Problem="Problem" Field="items" Id="info-items" />
+                        </div>
+                        <div class="field">
+                            <label for="info-message">Message to the coordinator (optional)</label>
+                            <textarea id="info-message" @bind="_message" aria-invalid="@Invalid("message")" aria-describedby="@Describe("message", "info-message")" data-testid="info-message"></textarea>
+                            <FieldError Problem="Problem" Field="message" Id="info-message" />
+                        </div>
+                        <div class="field">
+                            <label for="info-due">Response due date</label>
+                            <input type="date" id="info-due" @bind="_due" min="@Today.AddDays(1).ToString("yyyy-MM-dd")" aria-invalid="@Invalid("dueDate")" aria-describedby="@Describe("dueDate", "info-due", hint: true)" data-testid="info-due" />
+                            <span class="field__hint" id="info-due-hint">Default is @_ws.DefaultDueDate.ToString("ddd d MMM yyyy", Ui.Culture) (business days from the rules, A-13). Must be in the future.</span>
+                            <FieldError Problem="Problem" Field="dueDate" Id="info-due" />
+                        </div>
+                    }
+                    @if (_decision == "reject")
+                    {
+                        <div class="field">
+                            <label for="reject-reason">Rejection reason</label>
+                            <textarea id="reject-reason" @bind="_reason" aria-invalid="@Invalid("reason")" aria-describedby="@Describe("reason", "reject-reason", hint: true)" data-testid="reject-reason"></textarea>
+                            <span class="field__hint" id="reject-reason-hint">@Limits.ReasonMin to @Limits.ReasonMax characters. The coordinator is notified with this reason.</span>
+                            <FieldError Problem="Problem" Field="reason" Id="reject-reason" />
+                        </div>
+                    }
+                    <div class="row">
+                        <button type="submit" class="btn @(_decision == "reject" ? "btn--danger" : "btn--primary")" disabled="@Busy" data-testid="decision-submit">@SubmitLabel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </section>
+}
+
+<section aria-labelledby="queue-title">
+    <h2 id="queue-title">Waiting for review</h2>
+    <form class="filters" @onsubmit="ApplyFilters" novalidate role="search" aria-label="Filter the review queue">
+        <div class="field">
+            <label for="f-search">Search</label>
+            <input id="f-search" type="search" @bind="_search" placeholder="Reference, applicant or event" data-testid="filter-search" />
+        </div>
+        <div class="field">
+            <label for="f-category">Event category</label>
+            <select id="f-category" @bind="_category" data-testid="filter-category">
+                <option value="">All categories</option>
+                @foreach (var cat in _lookups?.Categories ?? [])
+                {
+                    <option value="@cat.Id">@cat.Name</option>
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="f-cemetery">Cemetery</label>
+            <select id="f-cemetery" @bind="_cemetery" data-testid="filter-cemetery">
+                <option value="">All cemeteries</option>
+                @foreach (var cem in Cemeteries)
+                {
+                    <option value="@cem.Id">@cem.Name</option>
+                }
+            </select>
+        </div>
+        <div class="row">
+            <button type="submit" class="btn btn--primary" data-testid="filter-apply">Apply filters</button>
+            @if (Filtered)
+            {
+                <a class="btn btn--quiet" href="/reviews">Clear</a>
+            }
+        </div>
+    </form>
+
+    @if (Loading && _rows is null)
+    {
+        <p role="status">Loading the queue…</p>
+    }
+    else if (_rows is { Count: 0 })
+    {
+        <EmptyState Title="@(Filtered ? "No submitted applications match these filters" : "No applications are waiting for review")">
+            @if (Filtered)
+            {
+                <p><a href="/reviews">Clear the filters</a> to see the whole queue.</p>
+            }
+            else
+            {
+                <p>New submissions appear here, oldest first. Answered information requests return cases to this queue.</p>
+            }
+        </EmptyState>
+    }
+    else if (_rows is not null)
+    {
+        <div class="card card--flush">
+            <div class="table-wrap">
+                <table class="table table--cards" data-testid="review-queue">
+                    <caption>@Ui.Plural(_total, "submitted application", "submitted applications"), oldest submission first</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Reference</th>
+                            <th scope="col">Applicant</th>
+                            <th scope="col">Event</th>
+                            <th scope="col">When and where</th>
+                            <th scope="col">Submitted</th>
+                            <th scope="col">Registry</th>
+                            <th scope="col">Open requests</th>
+                            <th scope="col"><span class="visually-hidden">Action</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _rows)
+                        {
+                            <tr class="@(r.Id == CaseId ? "is-selected" : null)" data-testid="review-row" data-reference="@r.Reference">
+                                <td data-label="Reference"><strong>@r.Reference</strong></td>
+                                <td data-label="Applicant">@r.ApplicantName</td>
+                                <td data-label="Event">@r.Title<br /><span class="muted">@(r.Category ?? "No category")</span></td>
+                                <td data-label="When and where">@(r.StartUtc is { } st ? Local(st, r.TimeZoneId) : "—")<br /><span class="muted">@(r.Cemetery ?? "—")</span></td>
+                                <td data-label="Submitted">@(r.SubmittedAt is { } sub ? Ui.Utc(sub) : "—")</td>
+                                <td data-label="Registry"><RegistryChip Outcome="r.Registry" Eligibility="r.Eligibility" /></td>
+                                <td data-label="Open requests">@r.OpenRequests</td>
+                                <td data-label="Action"><a class="btn btn--small btn--primary" href="@QueueUrl(r.Id)" data-testid="review-open">Review<span class="visually-hidden"> @r.Reference</span></a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <Pager Page="PageNumber" Total="_total" OnPage="GoToPage" />
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
+    [SupplyParameterFromQuery(Name = "category")] public Guid? CategoryId { get; set; }
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryId { get; set; }
+    [SupplyParameterFromQuery(Name = "page")] public int? PageParam { get; set; }
+    [SupplyParameterFromQuery(Name = "case")] public Guid? CaseId { get; set; }
+
+    private IntakeLookups? _lookups;
+    private IReadOnlyList<ReviewQueueRow>? _rows;
+    private int _total;
+    private ReviewWorkspace? _ws;
+    private ReviewWorkspace? _fresh;
+    private Guid? _loadedCase;
+    private string? _autoVerifyNote;
+
+    private string? _search;
+    private string _category = "";
+    private string _cemetery = "";
+
+    private bool[] _checks = [];
+    private string _decision = "eligible";
+    private string? _overrideReason, _items, _message, _reason;
+    private DateOnly? _due;
+
+    private int PageNumber => Math.Max(1, PageParam ?? 1);
+    private bool Filtered => !string.IsNullOrWhiteSpace(Q) || CategoryId is not null || CemeteryId is not null;
+    private DateOnly Today => DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+    private IEnumerable<(Guid Id, string Name)> Cemeteries => (_lookups?.Venues ?? []).Select(v => (v.CemeteryId, v.CemeteryName)).Distinct().OrderBy(c => c.Item2);
+
+    private string SubmitLabel => _decision switch
+    {
+        "info" => "Send information request",
+        "reject" => "Reject application",
+        _ => "Mark eligible",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!RendererInfo.IsInteractive) return; // data (and the automatic registry call) load once the circuit is live
+        _search = Q;
+        _category = CategoryId?.ToString() ?? "";
+        _cemetery = CemeteryId?.ToString() ?? "";
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (Problem?.StatusCode != 409) Problem = null;
+        await LoadAsync(async actor =>
+        {
+            _lookups ??= await Cases.LookupsAsync(actor);
+            if (CaseId is { } id)
+            {
+                if (_loadedCase != id || _ws is null) await OpenCaseAsync(actor, id);
+            }
+            else
+            {
+                _ws = null;
+                _loadedCase = null;
+            }
+            (_rows, _total) = await Reviews.QueueAsync(actor, new ReviewQueueFilter(Q, CategoryId, CemeteryId, PageNumber));
+        });
+    }
+
+    /// <summary>Opens the review view; runs the registry check automatically when no evidence exists yet (E5-02 AC1).</summary>
+    private async Task OpenCaseAsync(Actor actor, Guid id)
+    {
+        _autoVerifyNote = null;
+        ConflictRows = null;
+        var ws = await Reviews.WorkspaceAsync(actor, id);
+        if (ws.Verifications.Count == 0 && ws.Case.Status == CaseStatus.Submitted && actor.Can(Cap.VerifyRegistry))
+        {
+            try
+            {
+                var v = await Reviews.VerifyCaseAsync(actor, id);
+                _autoVerifyNote = $"Registry checked automatically on opening: {v.Detail}";
+                ws = await Reviews.WorkspaceAsync(actor, id);
+            }
+            catch (AppException ex)
+            {
+                _autoVerifyNote = "The automatic registry check did not run: " + ex.Message;
+            }
+        }
+        SetWorkspace(ws, resetInputs: true);
+        _loadedCase = id;
+        FocusAfterRender("#review-title");
+    }
+
+    private void SetWorkspace(ReviewWorkspace ws, bool resetInputs)
+    {
+        _ws = ws;
+        if (!resetInputs && _checks.Length == ws.Checklist.Count) return;
+        _checks = new bool[ws.Checklist.Count];
+        _decision = "eligible";
+        _overrideReason = _items = _message = _reason = null;
+        _due = ws.DefaultDueDate;
+    }
+
+    private void Choose(string decision)
+    {
+        _decision = decision;
+        if (Problem?.StatusCode == 400) Problem = null;
+    }
+
+    private void ApplyFilters()
+    {
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters("/reviews", new Dictionary<string, object?>
+        {
+            ["q"] = string.IsNullOrWhiteSpace(_search) ? null : _search.Trim(),
+            ["category"] = Guid.TryParse(_category, out var c) ? c : null,
+            ["cemetery"] = Guid.TryParse(_cemetery, out var m) ? m : null,
+            ["page"] = null,
+            ["case"] = null,
+        }));
+    }
+
+    private void GoToPage(int page) => Nav.NavigateTo(Nav.GetUriWithQueryParameter("page", page));
+
+    private string QueueUrl(Guid? caseId) => Nav.GetUriWithQueryParameters("/reviews", new Dictionary<string, object?>
+    {
+        ["q"] = Q, ["category"] = CategoryId, ["cemetery"] = CemeteryId, ["page"] = PageParam, ["case"] = caseId,
+    });
+
+    private async Task VerifyAsync()
+    {
+        if (_ws is null) return;
+        var id = _ws.Case.Id;
+        VerificationView? result = null;
+        if (await RunAsync(async actor =>
+            {
+                result = await Reviews.VerifyCaseAsync(actor, id);
+                SetWorkspace(await Reviews.WorkspaceAsync(actor, id), resetInputs: false);
+            }))
+        {
+            _autoVerifyNote = null;
+            Announcement = result!.Outcome == VerificationOutcome.Pending
+                ? $"Verification pending: {result.Detail} Use Retry verification when the registry is available again."
+                : $"Registry check recorded: {result.Detail}";
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (_ws is null) return;
+        var checks = new FieldChecks();
+        var latest = _ws.Verifications.FirstOrDefault();
+        switch (_decision)
+        {
+            case "eligible":
+                checks.Require(_checks.All(x => x), "checklist", "Resolve every checklist item before marking the application eligible.");
+                if (OverrideNeed(latest) is not null && OverrideAllowed(latest))
+                    checks.Text("overrideReason", _overrideReason, Limits.OverrideReasonMin, Limits.ReasonMax, "Override reason");
+                break;
+            case "info":
+                checks.Require(Lines(_items).Count > 0, "items", "List at least one missing item.")
+                      .Require(Lines(_items).All(i => i.Length <= 200), "items", "Each item must be at most 200 characters.")
+                      .Text("message", _message, 0, Limits.ReasonMax, "Message", false)
+                      .Require(_due is { } d && d > Today, "dueDate", "The due date must be in the future.");
+                break;
+            default:
+                checks.Text("reason", _reason, Limits.ReasonMin, Limits.ReasonMax, "Rejection reason");
+                break;
+        }
+        if (ClientInvalid(checks)) return;
+
+        var c = _ws.Case;
+        var checklist = _ws.Checklist.Select((item, i) => (item, i)).ToDictionary(x => x.item, x => _checks[x.i]);
+        var decision = _decision;
+        string? success = decision switch
+        {
+            "info" => $"Information requested for {c.Reference} (T2). The case now needs information and the coordinator has been notified.",
+            "reject" => $"{c.Reference} rejected (T5). The coordinator has been notified with your reason.",
+            _ => $"{c.Reference} marked eligible (T4). It moves to scheduling.",
+        };
+        var ok = await RunAsync(async actor =>
+        {
+            _ = decision switch
+            {
+                "info" => await Reviews.RequestInformationAsync(actor, c.Id, c.Version, Lines(_items), _message, _due),
+                "reject" => await Reviews.RejectAsync(actor, c.Id, c.Version, _reason, checklist),
+                _ => await Reviews.PassAsync(actor, c.Id, c.Version, checklist, string.IsNullOrWhiteSpace(_overrideReason) ? null : _overrideReason),
+            };
+        }, success);
+        if (ok)
+        {
+            ConflictRows = null;
+            _ws = null;
+            _loadedCase = null;
+            Nav.NavigateTo(QueueUrl(null));
+            FocusAfterRender("#queue-title");
+        }
+        else if (IsConflict)
+        {
+            await BuildConflictAsync(c.Id);
+        }
+    }
+
+    private async Task BuildConflictAsync(Guid id)
+    {
+        var mine = _ws!;
+        try
+        {
+            var actor = await GetActorAsync();
+            _fresh = await Reviews.WorkspaceAsync(actor, id);
+        }
+        catch (AppException)
+        {
+            _fresh = null;
+        }
+        var saved = _fresh?.Case;
+        var savedEvidence = _fresh?.Verifications.FirstOrDefault();
+        var myEvidence = mine.Verifications.FirstOrDefault();
+        ConflictRows =
+        [
+            new("Case status", saved is null ? "not visible" : Workflow.Display(saved.Status), Workflow.Display(mine.Case.Status)),
+            new("Record version", saved?.Version.ToString(), mine.Case.Version.ToString()),
+            new("Latest registry evidence", savedEvidence?.Detail, myEvidence?.Detail),
+            new("Open information requests", saved?.InformationRequests.Count(r => r.Status == InformationRequestStatus.Open).ToString(),
+                mine.Case.InformationRequests.Count(r => r.Status == InformationRequestStatus.Open).ToString()),
+            new("Your decision", null, SubmitLabel),
+        ];
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        Problem = null;
+        ConflictRows = null;
+        if (_fresh is not null) SetWorkspace(_fresh, resetInputs: true);
+        _fresh = null;
+        Announcement = "Reloaded the saved version. Review it and decide again.";
+        await Task.CompletedTask;
+    }
+
+    private async Task ReapplyAsync()
+    {
+        if (_fresh is null) return;
+        _ws = _fresh;
+        _fresh = null;
+        ConflictRows = null;
+        Problem = null;
+        await SubmitAsync();
+    }
+
+    private static string? OverrideNeed(RegistryVerification? latest) => latest switch
+    {
+        null or { Outcome: VerificationOutcome.Pending } => null,
+        { Outcome: VerificationOutcome.NotFound } or { Eligibility: RegistryEligibility.Unknown } => "Unknown",
+        { Eligibility: RegistryEligibility.Flagged } => "Flagged",
+        _ => null,
+    };
+
+    private bool OverrideAllowed(RegistryVerification? latest) => OverrideNeed(latest) switch
+    {
+        "Unknown" => _ws!.OverrideUnknown,
+        "Flagged" => _ws!.OverrideFlagged,
+        _ => true,
+    };
+
+    private string OverrideGuidance(RegistryVerification? latest) => latest switch
+    {
+        null => "Run the registry check before marking the application eligible.",
+        { Outcome: VerificationOutcome.Pending } => "The last check is pending (the registry was busy or unavailable). Retry before marking the application eligible; it never passes without evidence.",
+        _ when OverrideNeed(latest) is { } need => OverrideAllowed(latest)
+            ? $"The registry did not confirm eligibility ({need}). The rules allow an override with a reason of at least {Limits.OverrideReasonMin} characters."
+            : $"The registry result is {need} and the rules do not allow an override. Reject the application or request information instead.",
+        _ => "The registry confirms the applicant as Valid. No override is needed.",
+    };
+
+    private static List<string> Lines(string? text) => (text ?? "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).Distinct().ToList();
+
+    private static string Join(params string[] parts) => string.Join(" · ", parts.Where(p => !string.IsNullOrWhiteSpace(p))) is { Length: > 0 } s ? s : "—";
+
+    private static string ReviewLabel(ReviewDecision decision) => decision switch
+    {
+        ReviewDecision.Pass => "Marked eligible",
+        ReviewDecision.Reject => "Rejected",
+        _ => "Requested information",
+    };
+}

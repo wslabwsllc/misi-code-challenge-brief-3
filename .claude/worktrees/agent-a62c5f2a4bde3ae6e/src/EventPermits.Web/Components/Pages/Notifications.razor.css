@@ -1,0 +1,20 @@
+.status-tiles { margin-bottom: var(--space-4); }
+.status-tiles .is-current { outline: 3px solid var(--brand); outline-offset: 2px; }
+tr.is-selected { background: var(--brand-tint); }
+.wrap { overflow-wrap: anywhere; word-break: break-word; }
+.notification-detail { margin-top: var(--space-4); }
+.notification-detail h2 { margin: 0; overflow-wrap: anywhere; }
+.notification-detail h3 { margin: var(--space-3) 0 var(--space-2); font-size: 1.05rem; }
+.message-body { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-3); margin: 0; }
+.action-box { border: 1px solid var(--line-strong); border-radius: var(--radius); padding: var(--space-4); background: var(--surface-2); }
+.action-box h3 { margin-top: 0; }
+.card-title { margin: 0; padding: var(--space-4) var(--space-5) var(--space-2); }
+@media (max-width: 720px) {
+  /* Cards: keep multi-line cell content together beside its label. */
+  .table--cards td { display: block; position: relative; padding-left: calc(9.5em + var(--space-5)); min-height: 1.6em; overflow-wrap: anywhere; }
+  .table--cards td::before { position: absolute; left: var(--space-4); width: 9.5em; }
+  .table--cards caption { display: block; }
+}
+@media (max-width: 720px) {
+  .status-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+}

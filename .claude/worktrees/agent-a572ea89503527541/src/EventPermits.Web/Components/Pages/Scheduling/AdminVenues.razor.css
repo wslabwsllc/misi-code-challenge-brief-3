@@ -1,0 +1,20 @@
+.card__pad { padding: var(--space-5) var(--space-5) var(--space-3); }
+.card__pad h2 { margin: 0; }
+
+.subnav { margin-bottom: var(--space-4); border-bottom: 1px solid var(--line); }
+.subnav ul { display: flex; flex-wrap: wrap; gap: var(--space-1); list-style: none; margin: 0; padding: 0; }
+.subnav a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--space-4); text-decoration: none; color: var(--ink-muted); border-bottom: 3px solid transparent; font-weight: 600; }
+.subnav a:hover { color: var(--brand-strong); }
+.subnav a[aria-current=page] { color: var(--brand-strong); border-bottom-color: var(--brand); }
+
+.hours { display: grid; gap: var(--space-2); }
+.hours__row { display: grid; grid-template-columns: 9rem minmax(0, 8rem) auto minmax(0, 8rem); gap: var(--space-2); align-items: center; }
+.checks { display: grid; gap: var(--space-2); grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); }
+.narrow { max-width: 360px; margin-top: var(--space-3); }
+
+@media (max-width: 720px) {
+  .hours__row { grid-template-columns: 1fr 1fr; }
+  .hours__row > .check { grid-column: 1 / -1; }
+  .hours__row > span { display: none; }
+  .subnav a { padding: 0 var(--space-3); }
+}

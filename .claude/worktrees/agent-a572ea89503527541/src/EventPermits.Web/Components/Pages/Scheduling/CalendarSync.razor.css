@@ -1,0 +1,12 @@
+.card__pad { padding: var(--space-5) var(--space-5) var(--space-3); }
+.card__pad h2 { margin-top: 0; }
+.card__pad p:last-child { margin-bottom: 0; }
+
+.status-cards { margin-bottom: var(--space-4); }
+.kpi__value--text { font-size: 1.3rem; }
+
+.history { list-style: none; margin: var(--space-2) 0 0; padding: 0; font-size: .84rem; color: var(--ink-muted); }
+.history li + li { margin-top: var(--space-1); }
+.stack-sm { display: grid; gap: var(--space-2); justify-items: start; }
+
+.grid-2 { margin-top: var(--space-4); }

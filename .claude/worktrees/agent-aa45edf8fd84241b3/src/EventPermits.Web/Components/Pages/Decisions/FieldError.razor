@@ -1,0 +1,11 @@
+@* Field-level messages linked from the control through aria-describedby (id = "<control id>-error"). *@
+@if (Problem?.For(Field) is { Length: > 0 } messages)
+{
+    <p class="field__error" id="@(Id)-error" data-testid="error-@Field">@string.Join(" ", messages)</p>
+}
+
+@code {
+    [Parameter, EditorRequired] public UiProblem? Problem { get; set; }
+    [Parameter, EditorRequired] public string Field { get; set; } = "";
+    [Parameter, EditorRequired] public string Id { get; set; } = "";
+}

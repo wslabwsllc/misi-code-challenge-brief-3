@@ -1,0 +1,662 @@
+@page "/applications/{Id:guid}"
+@attribute [Authorize]
+@rendermode InteractiveServer
+@inherits CasesPage
+@using EventPermits.Application.Services
+@inject CaseService Cases
+@inject ReviewService Reviews
+@inject SchedulingService Scheduling
+@inject ApprovalService Approvals
+@inject PermitService Permits
+@inject OperationsService Operations
+
+<PageTitle>@(_d is null ? "Application Detail" : $"{_d.Reference} · Application Detail") · Memorial Event Operations</PageTitle>
+<PageHeader Title="@(_d?.Reference ?? "Application Detail")" Parent="@(Me?.Can(Cap.ViewRegister) == true ? ("Application Register", "/applications") : null)"
+            Lead="@(_d is null ? null : (string.IsNullOrWhiteSpace(_d.Event.Title) ? "Untitled draft" : _d.Event.Title))">
+    <Actions>
+        @if (_d?.Edit.Applicant == true)
+        {
+            <a class="btn" href="@($"applications/new/{Id}/step/{Math.Clamp(_d.WizardStep, 1, 4)}")" data-testid="detail-edit">Continue in the wizard</a>
+        }
+    </Actions>
+</PageHeader>
+
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<InteractiveMarker />
+<LiveRegion Message="@Announcement" />
+@if (_conflictRows is not null)
+{
+    <ConflictPanel Rows="_conflictRows" OnReload="ReloadAsync" OnReapply="@(_pending is null ? default : EventCallback.Factory.Create(this, ReapplyAsync))" />
+}
+
+@if (Loading && _d is null)
+{
+    <p role="status">Loading the case…</p>
+}
+else if (_d is not null)
+{
+    var d = _d;
+    <section class="card detail__summary" aria-labelledby="summary-title" data-testid="detail-summary">
+        <div class="row row--between">
+            <h2 id="summary-title" class="detail__h2">Summary</h2>
+            <span data-testid="detail-status"><StatusChip Status="d.Status" /></span>
+        </div>
+        <dl class="dl detail__facts">
+            <dt>Applicant</dt>
+            <dd>@Or(d.Applicant.FullName)@(string.IsNullOrWhiteSpace(d.Applicant.Organization) ? "" : $", {d.Applicant.Organization}")</dd>
+            <dt>Event type</dt><dd>@(d.Event.CategoryName ?? "Not chosen")</dd>
+            <dt>Venue</dt><dd>@(d.Reservation?.VenueName ?? d.Event.VenueName ?? "Not chosen")@(d.Event.CemeteryName is { } cem ? $", {cem}" : "")</dd>
+            <dt>Slot</dt><dd>@Slot(d)</dd>
+            <dt>Attendees</dt><dd>@(d.Event.AttendeeCount?.ToString(CultureInfo.InvariantCulture) ?? "Not set")@(d.Event.VenueCapacity is { } cap ? $" (venue holds {cap})" : "")</dd>
+            <dt>Permit</dt><dd>@(d.Permit is { } p ? $"{p.Number}, version {p.CurrentVersion} ({p.Status})" : "Not issued")</dd>
+            <dt>Coordinator</dt><dd>@Or(d.OwnerName)</dd>
+            <dt>Submitted</dt><dd>@(d.SubmittedAt is { } s ? Ui.Utc(s) : "Not yet")</dd>
+            @if (!string.IsNullOrWhiteSpace(d.DecisionReason))
+            {
+                <dt>Decision reason</dt><dd>@d.DecisionReason</dd>
+            }
+        </dl>
+        @if (d.Flags.Count > 0)
+        {
+            <div class="alert alert--warning" data-testid="detail-flags">
+                <p class="alert__title"><span class="alert__icon" aria-hidden="true">!</span> <strong>Risk flags</strong></p>
+                <ul>
+                    @foreach (var f in d.Flags)
+                    {
+                        <li>@f</li>
+                    }
+                </ul>
+            </div>
+        }
+    </section>
+
+    <section class="card" aria-labelledby="actions-title" data-testid="detail-actions">
+        <h2 id="actions-title">Actions you can take</h2>
+        @if (Actions.Count == 0)
+        {
+            <p data-testid="detail-no-actions">@NoActionText(d)</p>
+        }
+        else
+        {
+            <ul class="detail__actions">
+                @foreach (var a in Actions)
+                {
+                    var ui = Map(a.Id);
+                    <li data-testid="@($"action-{a.Id}")">
+                        @if (!a.Enabled)
+                        {
+                            <button type="button" class="btn" disabled aria-describedby="@($"blocked-{a.Id}")">@a.Id · @a.Name</button>
+                            <span class="detail__blocked" id="@($"blocked-{a.Id}")">Blocked: @a.BlockedReason</span>
+                        }
+                        else if (ui.Link is not null)
+                        {
+                            <a class="btn" href="@ui.Link">@a.Id · @a.Name</a>
+                            <span class="muted">@ui.Hint</span>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn @(ui.Danger ? "btn--danger" : "btn--primary")" @onclick="() => Open(a.Id)" aria-expanded="@(_pending == a.Id ? "true" : "false")"
+                                    aria-controls="action-form" data-testid="@($"action-open-{a.Id}")">@a.Id · @a.Name</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+
+        @if (_pending is { } pending)
+        {
+            var ui = Map(pending);
+            <form id="action-form" class="form detail__action-form" @onsubmit="ConfirmAsync" novalidate data-testid="action-form">
+                <h3>@ui.Title</h3>
+                <p>@ui.Hint</p>
+                @if (ui.Field is { } field)
+                {
+                    <div class="field">
+                        <label for="action-text">@ui.FieldLabel @(ui.Required ? "(required)" : "(optional)")</label>
+                        <textarea id="action-text" @bind="_actionText" maxlength="3000" aria-required="@(ui.Required ? "true" : null)"
+                                  aria-invalid="@Invalid(field)" aria-describedby="@Describe(field, "action-text-hint")" data-testid="action-text"></textarea>
+                        <span class="field__hint" id="action-text-hint">@(ui.Required ? $"At least {Limits.ReasonMin} characters. Recorded in the audit trail." : "Recorded in the audit trail.")</span>
+                        <FieldError For="@field" Messages="@Errs(field)" />
+                    </div>
+                }
+                <div class="row">
+                    <button type="submit" class="btn @(ui.Danger ? "btn--danger" : "btn--primary")" disabled="@Busy" data-testid="action-confirm">@ui.Confirm</button>
+                    <button type="button" class="btn" @onclick="Close" data-testid="action-cancel">Cancel</button>
+                </div>
+            </form>
+        }
+    </section>
+
+    <div class="split detail__body">
+        <div class="stack">
+            <section class="card" aria-labelledby="applicant-title">
+                <div class="row row--between">
+                    <h2 id="applicant-title" class="detail__h2">Applicant</h2>
+                    @if (d.Edit.Applicant)
+                    {
+                        <a href="@($"applications/new/{Id}/step/1")">Edit applicant<span class="visually-hidden"> details</span></a>
+                    }
+                </div>
+                <dl class="dl">
+                    <dt>Name</dt><dd>@Or(d.Applicant.FullName)</dd>
+                    <dt>Organisation</dt><dd>@Or(d.Applicant.Organization)</dd>
+                    <dt>Email</dt><dd class="@(d.Applicant.Masked ? "mask" : null)">@Or(d.Applicant.Email)</dd>
+                    <dt>Phone</dt><dd class="@(d.Applicant.Masked ? "mask" : null)">@Or(d.Applicant.Phone)</dd>
+                    <dt>Registry reference</dt><dd>@Or(d.Applicant.RegistryReference)</dd>
+                    @if (d.LatestVerification is { } lv)
+                    {
+                        <dt>Registry check</dt><dd>@lv.Outcome@(lv.Eligibility is { } el ? $" · {el}" : "") @(lv.VerifiedAt is { } va ? $"({Ui.Utc(va)})" : "")</dd>
+                    }
+                </dl>
+                @if (d.Applicant.Masked)
+                {
+                    <p class="muted">Contact details are masked for your role.</p>
+                }
+            </section>
+
+            <section class="card" aria-labelledby="event-title">
+                <div class="row row--between">
+                    <h2 id="event-title" class="detail__h2">Event</h2>
+                    @if (d.Edit.Event)
+                    {
+                        <a href="@($"applications/new/{Id}/step/2")">Edit event<span class="visually-hidden"> details</span></a>
+                    }
+                </div>
+                <dl class="dl">
+                    <dt>Title</dt><dd>@Or(d.Event.Title)</dd>
+                    <dt>Type</dt><dd>@(d.Event.CategoryName ?? "Not chosen")</dd>
+                    <dt>Preferred venue</dt><dd>@(d.Event.VenueName ?? "Not chosen")</dd>
+                    <dt>Requested slot</dt><dd>@(d.Event.StartUtc is { } st ? Local(st, d.Event.TimeZoneId) : "Not set")@(d.Event.DurationMinutes is { } dm ? $", {dm} minutes" : "")</dd>
+                    <dt>Description</dt><dd>@Or(d.Event.Description)</dd>
+                </dl>
+                <div class="row row--between">
+                    <h3>Facilities</h3>
+                    @if (d.Edit.Facilities)
+                    {
+                        <a href="@($"applications/new/{Id}/step/3")">Edit facilities</a>
+                    }
+                </div>
+                @if (d.RequestedResources.Count == 0)
+                {
+                    <p>No resources requested.</p>
+                }
+                else
+                {
+                    <ul>
+                        @foreach (var r in d.RequestedResources)
+                        {
+                            <li>@r.Quantity @r.Name (@r.Unit)</li>
+                        }
+                    </ul>
+                }
+                <p><strong>Special needs:</strong> @Or(d.Event.SpecialNeeds)</p>
+            </section>
+
+            @if (d.Reservation is { } res)
+            {
+                <section class="card" aria-labelledby="reservation-title">
+                    <h2 id="reservation-title">Reservation</h2>
+                    <dl class="dl">
+                        <dt>Venue</dt><dd>@res.VenueName</dd>
+                        <dt>Event window</dt><dd>@Local(res.StartUtc, d.Event.TimeZoneId) to @Ui.LocalTime(res.EndUtc, d.Event.TimeZoneId)</dd>
+                        <dt>Blocked incl. buffers</dt><dd>@Ui.LocalTime(res.BlockStartUtc, d.Event.TimeZoneId) to @Ui.LocalTime(res.BlockEndUtc, d.Event.TimeZoneId)</dd>
+                        <dt>Status</dt><dd>@res.Status</dd>
+                        <dt>Regional calendar</dt><dd>@res.CalendarState</dd>
+                        <dt>Attendant needs</dt><dd>@Or(res.AttendantNeeds)</dd>
+                        <dt>Allocations</dt>
+                        <dd>@(res.Allocations.Count(x => !x.Released) == 0 ? "None" : string.Join(", ", res.Allocations.Where(x => !x.Released).Select(x => $"{x.Quantity} {x.Name}")))</dd>
+                    </dl>
+                </section>
+            }
+
+            @if (d.Permit is { } permit)
+            {
+                <section class="card card--flush" aria-labelledby="permit-title">
+                    <h2 id="permit-title" class="detail__flush-title">Permit @permit.Number</h2>
+                    <div class="table-wrap">
+                        <table class="table table--cards table--compact">
+                            <thead><tr><th scope="col">Version</th><th scope="col">Status</th><th scope="col">Issued</th><th scope="col">Window</th><th scope="col">Reason</th></tr></thead>
+                            <tbody>
+                                @foreach (var v in permit.Versions)
+                                {
+                                    <tr>
+                                        <td data-label="Version">@v.VersionNumber</td>
+                                        <td data-label="Status">@v.Status</td>
+                                        <td data-label="Issued">@Ui.Utc(v.IssuedAt) by @v.IssuedByName</td>
+                                        <td data-label="Window">@Local(v.StartUtc, d.Event.TimeZoneId)</td>
+                                        <td data-label="Reason">@(v.RevokedReason ?? v.ReissueReason ?? "—")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            }
+
+            @if (d.InformationRequests.Count > 0)
+            {
+                <section class="card" aria-labelledby="requests-title">
+                    <h2 id="requests-title">Information requests</h2>
+                    @foreach (var r in d.InformationRequests)
+                    {
+                        <article class="detail__request">
+                            <p><span class="chip @(r.Status == InformationRequestStatus.Open ? "chip--attention" : "chip--good")">@r.Status</span> due @r.DueDate.ToString("d MMM yyyy", Ui.Culture), asked by @r.RequestedByName</p>
+                            <ul>
+                                @foreach (var item in r.MissingItems)
+                                {
+                                    <li>@item</li>
+                                }
+                            </ul>
+                            @if (!string.IsNullOrWhiteSpace(r.Message))
+                            {
+                                <p>@r.Message</p>
+                            }
+                            @if (r.ResponseText is not null)
+                            {
+                                <p><strong>Response</strong> (@(r.RespondedAt is { } ra ? Ui.Utc(ra) : "")): @r.ResponseText</p>
+                            }
+                        </article>
+                    }
+                </section>
+            }
+
+            @if (d.Reviews.Count > 0 || d.Approvals.Count > 0)
+            {
+                <section class="card" aria-labelledby="decisions-title">
+                    <h2 id="decisions-title">Decisions</h2>
+                    <ul class="detail__list">
+                        @foreach (var r in d.Reviews)
+                        {
+                            <li>Eligibility: <strong>@r.Decision</strong> by @r.ReviewerName, @Ui.Utc(r.CreatedAt)@(r.Reason is { } why ? $". {why}" : "")@(r.RegistryOverride ? $" (registry override: {r.OverrideReason})" : "")</li>
+                        }
+                        @foreach (var a in d.Approvals)
+                        {
+                            <li>Approval: <strong>@a.Outcome</strong> by @a.ApproverName, @Ui.Utc(a.DecidedAt)@(string.IsNullOrWhiteSpace(a.Notes) ? "" : $". {a.Notes}")</li>
+                        }
+                    </ul>
+                </section>
+            }
+
+            @if (d.CheckIns.Count > 0 || d.Incidents.Count > 0)
+            {
+                <section class="card" aria-labelledby="eventday-title">
+                    <h2 id="eventday-title">Event day</h2>
+                    <ul class="detail__list">
+                        @foreach (var c in d.CheckIns)
+                        {
+                            <li>Checked in @Ui.Utc(c.CheckedInAt) by @c.AttendantName@(c.CheckedOutAt is { } co ? $", checked out {Ui.Utc(co)}" : ", not checked out yet")</li>
+                        }
+                        @foreach (var i in d.Incidents)
+                        {
+                            <li>Incident @i.Reference: <span class="chip @Ui.SeverityClass(i.Severity)">@i.Severity</span> @i.Category, @i.Status</li>
+                        }
+                    </ul>
+                </section>
+            }
+
+            <section class="card" aria-labelledby="documents-title" data-testid="detail-documents">
+                <h2 id="documents-title">Documents</h2>
+                @if (d.Documents.Count == 0)
+                {
+                    <p>No documents on this case@(d.Edit.Documents ? " yet. Upload one below." : ".")</p>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table--cards table--compact">
+                            <thead><tr><th scope="col">File</th><th scope="col">Type</th><th scope="col">Size</th><th scope="col">Uploaded</th><th scope="col">Download</th></tr></thead>
+                            <tbody>
+                                @foreach (var doc in d.Documents)
+                                {
+                                    <tr data-testid="detail-document">
+                                        <td data-label="File">@doc.FileName</td>
+                                        <td data-label="Type">@(doc.Purpose == AttachmentPurpose.ApplicationDocument ? CaseService.Label(doc.DocumentType) : PurposeLabel(doc.Purpose))</td>
+                                        <td data-label="Size">@Size(doc.SizeBytes)</td>
+                                        <td data-label="Uploaded">@Ui.Utc(doc.UploadedAt) by @doc.UploadedBy</td>
+                                        <td data-label="Download"><DocumentLink Attachment="doc" /></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                @if (d.Edit.Documents)
+                {
+                    <form class="form detail__upload" @onsubmit="UploadAsync" novalidate data-testid="detail-upload-form">
+                        <h3>Add a document</h3>
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="documentType">Document type</label>
+                                <select id="documentType" @bind="_uploadType" data-testid="detail-doctype">
+                                    @foreach (var t in Enum.GetValues<DocumentType>())
+                                    {
+                                        <option value="@t">@CaseService.Label(t)</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label for="file">File</label>
+                                <InputFile id="file" @key="_fileKey" OnChange="e => _file = e.File" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                                           aria-invalid="@(FileErrors.Count > 0 ? "true" : null)" aria-describedby="@(FileErrors.Count > 0 ? "file-hint file-error" : "file-hint")" data-testid="detail-file" />
+                                <span class="field__hint" id="file-hint">PDF, PNG or JPG, at most 5 MiB.</span>
+                                <FieldError For="file" Messages="FileErrors" />
+                            </div>
+                        </div>
+                        <div><button type="submit" class="btn" disabled="@Busy" data-testid="detail-upload">Upload document</button></div>
+                    </form>
+                }
+            </section>
+
+            <section class="card" aria-labelledby="comments-title" data-testid="detail-comments">
+                <h2 id="comments-title">Comments</h2>
+                @if (d.Edit.Comment)
+                {
+                    <form class="form" @onsubmit="CommentAsync" novalidate data-testid="comment-form">
+                        <div class="field">
+                            <label for="body">Add a comment</label>
+                            <textarea id="body" @bind="_comment" maxlength="@Limits.CommentMax" aria-invalid="@Invalid("body")" aria-describedby="@Describe("body", "body-hint")" data-testid="comment-body"></textarea>
+                            <span class="field__hint" id="body-hint">Comments are permanent and appear in the timeline. Up to @Limits.CommentMax characters.</span>
+                            <FieldError For="body" Messages="@Errs("body")" />
+                        </div>
+                        <div><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="comment-add">Add comment</button></div>
+                    </form>
+                }
+                else
+                {
+                    <p class="muted">Your role can read comments on this case but not add them.</p>
+                }
+                @if (d.Comments.Count == 0)
+                {
+                    <p data-testid="comments-empty">No comments yet.</p>
+                }
+                else
+                {
+                    <ul class="detail__comments">
+                        @foreach (var c in d.Comments)
+                        {
+                            <li data-testid="comment">
+                                <p class="timeline__meta">@c.AuthorName · @Ui.Utc(c.CreatedAt)</p>
+                                <p class="detail__comment-body">@c.Body</p>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        </div>
+
+        <section class="card" aria-labelledby="timeline-title" data-testid="detail-timeline">
+            <h2 id="timeline-title">Timeline</h2>
+            <div class="field">
+                <label for="timeline-filter">Show</label>
+                <select id="timeline-filter" @bind="_timelineFilter" data-testid="timeline-filter">
+                    <option value="all">Everything</option>
+                    <option value="status">Status changes</option>
+                    <option value="documents">Documents</option>
+                    <option value="comments">Comments</option>
+                    <option value="other">Other activity</option>
+                </select>
+            </div>
+            @if (Timeline.Count == 0)
+            {
+                <p>Nothing recorded for this filter.</p>
+            }
+            else
+            {
+                <ul class="timeline detail__timeline">
+                    @foreach (var e in Timeline)
+                    {
+                        <li data-testid="timeline-item" data-action="@e.Action">
+                            <strong>@e.Summary</strong>
+                            @if (e.Action == "Comment.Added" && d.Comments.FirstOrDefault(c => c.Id.ToString() == e.EntityId) is { } comment)
+                            {
+                                <p class="detail__comment-body">“@comment.Body”</p>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(e.Reason))
+                            {
+                                <p>Reason: @e.Reason</p>
+                            }
+                            <p class="timeline__meta">@e.ActorName · @Ui.Utc(e.At)</p>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+    [SupplyParameterFromQuery(Name = "submitted")] public bool? Submitted { get; set; }
+
+    private sealed record ActionUi(string Title, string Hint, string Confirm, string? Link = null, string? Field = null, string? FieldLabel = null, bool Required = false, bool Danger = false);
+
+    private CaseDetail? _d;
+    private Guid _loaded;
+    private string? _pending;
+    private string? _actionText;
+    private string? _comment;
+    private string _timelineFilter = "all";
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+    private CaseDetail? _fresh;
+    private DocumentType _uploadType = DocumentType.Other;
+    private IBrowserFile? _file;
+    private int _fileKey;
+
+    /// <summary>Workflow actions from the service (E4-04 AC4) plus the weather acknowledgement that unblocks T10.</summary>
+    private IReadOnlyList<ActionInfo> Actions
+    {
+        get
+        {
+            if (_d is null) return [];
+            var list = _d.Actions.ToList();
+            if (_d.Weather?.Advisory == WeatherAdvisory.Severe && _d.WeatherAcknowledgedAt is null && Me?.Can(Cap.AcknowledgeWeather) == true
+                && _d.Status is CaseStatus.PendingApproval or CaseStatus.Approved)
+                list.Add(new ActionInfo("ACK", "Acknowledge severe weather", true, null));
+            return list;
+        }
+    }
+
+    private IReadOnlyList<string> FileErrors => [.. Errs("file"), .. (Problem?.Code == ErrorCodes.AttachmentRejected ? [Problem.Title] : Array.Empty<string>())];
+
+    private IReadOnlyList<AuditEvent> Timeline => (_d?.Timeline ?? []).Where(e => _timelineFilter switch
+    {
+        "status" => e.Action.StartsWith("Transition.", StringComparison.Ordinal),
+        "documents" => e.EntityType == nameof(Attachment),
+        "comments" => e.Action.StartsWith("Comment.", StringComparison.Ordinal),
+        "other" => !e.Action.StartsWith("Transition.", StringComparison.Ordinal) && e.EntityType != nameof(Attachment) && !e.Action.StartsWith("Comment.", StringComparison.Ordinal),
+        _ => true,
+    }).ToList();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Id == _loaded) return;
+        _loaded = Id;
+        _d = null;
+        Problem = null;
+        await LoadAsync(async a => _d = await Cases.GetAsync(a, Id));
+        if (Submitted == true && _d?.Status == CaseStatus.Submitted) Announcement = $"Application {_d.Reference} submitted for eligibility review.";
+        if (_d is not null) _uploadType = _d.Event.RequiredDocuments.FirstOrDefault(r => _d.Documents.All(x => x.DocumentType != r), DocumentType.Other);
+    }
+
+    private async Task ReloadAsync()
+    {
+        _conflictRows = null;
+        Problem = null;
+        await LoadAsync(async a => _d = await Cases.GetAsync(a, Id));
+    }
+
+    private ActionUi Map(string id) => id switch
+    {
+        "T1" => new("Submit application", "Sends the application for eligibility review. It cannot be edited afterwards.", "Submit application"),
+        "T2" => new("Request information", "List the missing items and a due date in the review workspace.", "", Link: $"reviews/{Id}"),
+        "T3" => new("Respond and resubmit", "Every open information request must have a response. Earlier requests stay on record.", "Resubmit"),
+        "T4" => new("Pass eligibility", "Complete the checklist and registry check in the review workspace.", "", Link: $"reviews/{Id}"),
+        "T5" => new("Reject at eligibility", "The applicant is told the reason. The case stays visible with its history.", "Reject application", Field: "reason", FieldLabel: "Rejection reason", Required: true, Danger: true),
+        "T6" => new("Tentatively reserve", "Choose the slot and resources with live collision checks.", "", Link: $"venues/availability?case={Id}"),
+        "T7" => new("Submit for approval", "Sends the reservation summary to the Operations Manager.", "Submit for approval"),
+        "T8" => new("Approve", "Approves the case so the permit can be issued.", "Approve", Field: "notes", FieldLabel: "Decision notes"),
+        "T9" => new("Reject at approval", "Releases the reservation, allocations and calendar hold.", "Reject application", Field: "reason", FieldLabel: "Rejection reason", Required: true, Danger: true),
+        "T10" => new("Issue permit", "Generates an immutable permit version with a signed token and PDF.", "Issue permit", Field: "conditions", FieldLabel: "Permit conditions"),
+        "T11" => new("Check in", "Verify the permit token at the venue.", "", Link: "operations/check-in"),
+        "T12" => new("Complete event", "Requires the check-out and a complete readiness checklist.", "Complete event"),
+        "T13" => new("Close case", "Closes the case. No unresolved High or Critical incident may remain.", "Close case", Field: "note", FieldLabel: "Closing note"),
+        "T14" => new("Cancel case", "Releases reservations and allocations and invalidates the current permit.", "Cancel case", Field: "reason", FieldLabel: "Cancellation reason", Required: true, Danger: true),
+        "ACK" => new("Acknowledge severe weather", "Records that you reviewed the severe weather advisory for the event date.", "Acknowledge", Field: "note", FieldLabel: "Acknowledgement note", Required: true),
+        _ => new(id, "", "Confirm"),
+    };
+
+    private Task<CaseRef> Execute(Actor a, string action, uint version, string? text) => action switch
+    {
+        "T1" => Cases.SubmitAsync(a, Id, version),
+        "T3" => Reviews.ResubmitAsync(a, Id, version),
+        "T5" => Reviews.RejectAsync(a, Id, version, text, null),
+        "T7" => Scheduling.SubmitForApprovalAsync(a, Id, version),
+        "T8" => Approvals.ApproveAsync(a, Id, version, text),
+        "T9" => Approvals.RejectAsync(a, Id, version, text),
+        "T10" => Permits.IssueAsync(a, Id, version, text),
+        "T12" => Operations.CompleteAsync(a, Id, version),
+        "T13" => Operations.CloseAsync(a, Id, version, text),
+        "T14" => Operations.CancelAsync(a, Id, version, text),
+        "ACK" => Approvals.AcknowledgeWeatherAsync(a, Id, version, text),
+        _ => throw new BusinessRuleException(ErrorCodes.InvalidTransition, "This action is done on its own page."),
+    };
+
+    private void Open(string action)
+    {
+        Problem = null;
+        _conflictRows = null;
+        _pending = action;
+        _actionText = null;
+    }
+
+    private void Close()
+    {
+        _pending = null;
+        _actionText = null;
+        Problem = null;
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (_d is null || _pending is not { } action) return;
+        var ui = Map(action);
+        if (ui.Required && string.IsNullOrWhiteSpace(_actionText))
+        {
+            LocalError(ui.Field!, $"{ui.FieldLabel} is required.");
+            return;
+        }
+        var version = _d.Version;
+        var before = _d.Status;
+        if (await RunAsync(async a =>
+            {
+                await Execute(a, action, version, string.IsNullOrWhiteSpace(_actionText) ? null : _actionText.Trim());
+                _d = await Cases.GetAsync(a, Id);
+            }, null))
+        {
+            Announcement = _d.Status != before ? $"{ui.Title} done. The case is now {Workflow.Display(_d.Status)}." : $"{ui.Title} recorded.";
+            _pending = null;
+            _actionText = null;
+        }
+        else if (Problem?.StatusCode == 409) await BuildConflictAsync();
+    }
+
+    private async Task ReapplyAsync()
+    {
+        if (_fresh is null) return;
+        _d = _fresh;
+        _conflictRows = null;
+        await ConfirmAsync();
+    }
+
+    private async Task BuildConflictAsync()
+    {
+        try
+        {
+            var fresh = await Cases.GetAsync(await GetActorAsync(), Id);
+            _fresh = fresh;
+            var seen = _d!;
+            _conflictRows =
+            [
+                new("Status", Workflow.Display(fresh.Status), Workflow.Display(seen.Status)),
+                new("Last updated", Ui.Utc(fresh.UpdatedAt), Ui.Utc(seen.UpdatedAt)),
+                new("Comments", fresh.Comments.Count.ToString(CultureInfo.InvariantCulture), seen.Comments.Count.ToString(CultureInfo.InvariantCulture)),
+                new("Documents", fresh.Documents.Count.ToString(CultureInfo.InvariantCulture), seen.Documents.Count.ToString(CultureInfo.InvariantCulture)),
+                new("Your pending action", null, _pending is null ? null : $"{Map(_pending).Title}{(string.IsNullOrWhiteSpace(_actionText) ? "" : $": {_actionText}")}"),
+            ];
+        }
+        catch (AppException ex)
+        {
+            Problem = UiProblem.From(ex, Correlation.BeginOperation());
+        }
+    }
+
+    private async Task CommentAsync()
+    {
+        if (_d is null) return;
+        if (string.IsNullOrWhiteSpace(_comment))
+        {
+            LocalError("body", "Comment is required.");
+            return;
+        }
+        var version = _d.Version;
+        if (await RunAsync(async a =>
+            {
+                await Cases.AddCommentAsync(a, Id, version, _comment);
+                _d = await Cases.GetAsync(a, Id);
+            }, "Comment added."))
+            _comment = null;
+        else if (Problem?.StatusCode == 409) await BuildConflictAsync();
+    }
+
+    private async Task UploadAsync()
+    {
+        if (_d is null) return;
+        if (_file is null)
+        {
+            LocalError("file", "Choose a file to upload.");
+            return;
+        }
+        if (_file.Size > Limits.MaxAttachmentBytes)
+        {
+            LocalError("file", $"The file is larger than 5 MiB ({Limits.MaxAttachmentBytes:N0} bytes).");
+            return;
+        }
+        var file = _file;
+        var type = _uploadType;
+        var version = _d.Version;
+        if (await RunAsync(async a =>
+            {
+                await using var stream = file.OpenReadStream(Limits.MaxAttachmentBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                await Cases.UploadDocumentAsync(a, Id, version, type, new UploadFile(file.Name, file.ContentType, buffer.ToArray()));
+                _d = await Cases.GetAsync(a, Id);
+            }, $"{file.Name} uploaded."))
+        {
+            _file = null;
+            _fileKey++;
+        }
+        else if (Problem?.StatusCode == 409) await BuildConflictAsync();
+    }
+
+    private string Slot(CaseDetail d)
+    {
+        if (d.Reservation is { } r) return $"{Local(r.StartUtc, d.Event.TimeZoneId)} to {Ui.LocalTime(r.EndUtc, d.Event.TimeZoneId)} (reserved)";
+        if (d.Event.StartUtc is { } s) return $"{Local(s, d.Event.TimeZoneId)}{(d.Event.DurationMinutes is { } m ? $" for {m} minutes" : "")} (requested)";
+        return "Not set";
+    }
+
+    private string NoActionText(CaseDetail d) => Workflow.IsTerminal(d.Status)
+        ? $"The case is {Workflow.Display(d.Status)}. No further workflow actions are possible; its history stays visible."
+        : "No workflow action is available to your role at this stage.";
+
+    private static string Or(string? value) => string.IsNullOrWhiteSpace(value) ? "Not entered" : value;
+
+    private static string PurposeLabel(AttachmentPurpose p) => p switch
+    {
+        AttachmentPurpose.InformationResponse => "Information response",
+        AttachmentPurpose.IncidentPhoto => "Incident photo",
+        AttachmentPurpose.PermitPdf => "Permit PDF",
+        _ => "Application document",
+    };
+}

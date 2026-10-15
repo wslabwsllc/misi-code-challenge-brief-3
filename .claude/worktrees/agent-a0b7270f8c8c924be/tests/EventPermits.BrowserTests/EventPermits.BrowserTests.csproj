@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.Playwright" />
+    <PackageReference Include="Deque.AxeCore.Playwright" />
+    <PackageReference Include="Testcontainers" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="AWSSDK.S3" />
+    <ProjectReference Include="..\..\src\EventPermits.Web\EventPermits.Web.csproj" />
+    <ProjectReference Include="..\..\src\EventPermits.Mocks\EventPermits.Mocks.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Same in-process host as the integration suite (real PostgreSQL, SeaweedFS and mocks; web app on Kestrel). -->
+    <Compile Include="..\EventPermits.IntegrationTests\Support\*.cs" Link="Support\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

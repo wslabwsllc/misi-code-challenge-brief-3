@@ -1,0 +1,38 @@
+@* Grouped navigation showing only the pages the signed-in user may open (E1-04). *@
+<AuthorizeView>
+    <Authorized>
+        <details open="@_open">
+            <summary aria-controls="main-nav">☰ Menu</summary>
+            <nav id="main-nav">
+                @foreach (var group in PageCatalog.GroupOrder)
+                {
+                    var entries = PageCatalog.All.Where(p => p.Group == group && Cap.Allows(p.Capability, Roles(context.User))).ToList();
+                    if (entries.Count == 0) continue;
+                    <div class="nav-group">
+                        <p class="nav-group__title" id="nav-@Slug(group)">@group</p>
+                        <ul aria-labelledby="nav-@Slug(group)">
+                            @foreach (var entry in entries)
+                            {
+                                <li>
+                                    <NavLink class="nav-link" href="@entry.Route.TrimStart('/')" Match="@(entry.Route == "/applications" ? NavLinkMatch.All : NavLinkMatch.Prefix)" data-testid="@($"nav-{entry.Number:D2}")">
+                                        <span class="nav-link__num" aria-hidden="true">@entry.Number.ToString("D2")</span>
+                                        <span>@entry.Title</span>
+                                    </NavLink>
+                                </li>
+                            }
+                        </ul>
+                    </div>
+                }
+            </nav>
+        </details>
+    </Authorized>
+</AuthorizeView>
+
+@code {
+    private bool _open = true;
+
+    private static IEnumerable<string> Roles(System.Security.Claims.ClaimsPrincipal user) =>
+        user.Claims.Where(c => c.Type == System.Security.Claims.ClaimTypes.Role).Select(c => c.Value);
+
+    private static string Slug(string group) => group.ToLowerInvariant().Replace(' ', '-');
+}

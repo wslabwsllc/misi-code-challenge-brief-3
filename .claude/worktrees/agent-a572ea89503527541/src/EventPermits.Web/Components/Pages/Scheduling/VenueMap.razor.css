@@ -1,0 +1,28 @@
+.vmap { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #eef1ec; }
+.vmap svg { display: block; width: 100%; height: auto; }
+.vmap__bg { fill: #eef1ec; }
+.vmap__grid { stroke: #cdd5cb; stroke-width: 1; }
+.vmap__gridlabel { fill: var(--ink-muted); font-size: 16px; font-family: var(--font-ui); }
+.vmap__empty { fill: var(--ink-muted); font-size: 22px; font-family: var(--font-ui); }
+.vmap__marker { cursor: pointer; }
+.vmap__marker:focus { outline: none; }
+.vmap__marker:focus-visible .vmap__dot { stroke: var(--focus); stroke-width: 5; }
+.vmap__dot { stroke: #fff; stroke-width: 3; }
+.vmap__marker.is-verified .vmap__dot { fill: var(--brand); }
+.vmap__marker.is-unverified .vmap__dot { fill: #fff; stroke: var(--warn); stroke-dasharray: 4 3; stroke-width: 3; }
+.vmap__marker.is-selected .vmap__dot { fill: var(--accent); stroke: #fff; }
+.vmap__halo { fill: rgb(125 93 34 / 22%); stroke: var(--accent); stroke-width: 2; }
+.vmap__label { fill: var(--ink); font-size: 17px; font-family: var(--font-ui); font-weight: 600; paint-order: stroke; stroke: #eef1ec; stroke-width: 4px; }
+
+.vmap-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); list-style: none; padding: 0; margin: var(--space-3) 0 0; font-size: .85rem; color: var(--ink-muted); }
+.vmap-legend li { display: inline-flex; align-items: center; gap: var(--space-2); }
+.vmap-legend__dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line-strong); }
+.vmap-legend__dot.is-verified { background: var(--brand); }
+.vmap-legend__dot.is-unverified { background: #fff; border: 2px dashed var(--warn); box-shadow: none; }
+.vmap-legend__dot.is-selected { background: var(--accent); }
+
+.geo-actions { margin: var(--space-4) 0; }
+.candidate { padding: var(--space-2) 0; border-bottom: 1px solid var(--line); align-items: flex-start; }
+.candidate:last-of-type { border-bottom: 0; }
+.list-title { margin: 0; padding: var(--space-4) var(--space-5) var(--space-2); }
+tr.is-selected td { background: var(--accent-tint); }

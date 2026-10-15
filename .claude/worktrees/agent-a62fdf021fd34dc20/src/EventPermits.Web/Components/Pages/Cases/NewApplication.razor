@@ -1,0 +1,824 @@
+@page "/applications/new"
+@page "/applications/new/{Id:guid}/step/{Step:int}"
+@attribute [Authorize(Policy = Cap.CreateApplication)]
+@rendermode InteractiveServer
+@inherits CasesPage
+@implements IDisposable
+@using EventPermits.Application.Services
+@inject CaseService Cases
+@inject RegisterService Register
+@inject RuleService Rules
+
+<PageTitle>@(_reference is null ? "New Application" : $"Application {_reference} · step {CurrentStep}") · Memorial Event Operations</PageTitle>
+<PageHeader Title="@(_reference is null ? "New Application" : $"Application {_reference}")" Parent="@(("Application Register", "/applications"))"
+            Lead="Four steps. Your draft is saved as you go: after a short pause, when you change step, or when you choose Save draft." />
+
+<ProblemAlert Problem="@(_quietProblem ? null : Problem)" />
+<InteractiveMarker />
+<LiveRegion Message="@Announcement" />
+<p class="wizard__status" role="status" aria-live="polite" data-testid="wizard-status">@_saveStatus</p>
+
+@if (_conflictRows is not null)
+{
+    <ConflictPanel Rows="_conflictRows" OnReload="ReloadSavedAsync" OnReapply="ReapplyAsync" />
+}
+
+@if (Loading && _lookups is null)
+{
+    <p role="status">Loading the application…</p>
+}
+else if (_detail is not null && !_detail.Edit.Applicant)
+{
+    <section class="card" data-testid="wizard-locked">
+        <h2>This application can no longer be edited here</h2>
+        <p>@_detail.Reference is <StatusChip Status="_detail.Status" />. Only drafts and applications waiting for information can be changed by their coordinator.</p>
+        <p><a class="btn btn--primary" href="@($"applications/{_detail.Id}")">Open the application</a></p>
+    </section>
+}
+else if (_lookups is not null && (Id is null || _detail is not null))
+{
+    <nav aria-label="Wizard steps">
+        <ol class="steps" data-testid="wizard-steps">
+            @foreach (var (n, label) in StepNames)
+            {
+                var current = n == CurrentStep;
+                <li class="@(current ? "is-current" : null) @(IsDone(n) ? "is-done" : null)" data-testid="@($"wizard-step-{n}")">
+                    @if (_id is not null && !current)
+                    {
+                        <a href="@StepUrl(n)" @onclick="() => GoToStepAsync(n)" @onclick:preventDefault><span class="step-num" aria-hidden="true">@n</span> @label<span class="visually-hidden">@(IsDone(n) ? " (complete)" : "")</span></a>
+                    }
+                    else
+                    {
+                        <span aria-current="@(current ? "step" : null)"><span class="step-num" aria-hidden="true">@n</span> @label<span class="visually-hidden">@(IsDone(n) ? " (complete)" : "")</span></span>
+                    }
+                </li>
+            }
+        </ol>
+    </nav>
+
+    <div class="wizard__layout">
+        <section class="card" aria-labelledby="step-title">
+            <h2 id="step-title">Step @CurrentStep of 4: @StepNames[CurrentStep - 1].Label</h2>
+            @switch (CurrentStep)
+            {
+                case 1:
+                    <form class="form" @onsubmit="NextAsync" novalidate data-testid="wizard-form-1">
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="fullName">Applicant name <span class="muted">(required)</span></label>
+                                <input id="fullName" @bind="_applicant.FullName" @bind:event="oninput" @bind:after="Changed" maxlength="@Limits.ApplicantNameMax" autocomplete="name"
+                                       aria-required="true" aria-invalid="@Invalid("fullName")" aria-describedby="@Describe("fullName")" data-testid="wizard-fullName" />
+                                <FieldError For="fullName" Messages="@Errs("fullName")" />
+                            </div>
+                            <div class="field">
+                                <label for="organization">Organisation</label>
+                                <input id="organization" @bind="_applicant.Organization" @bind:event="oninput" @bind:after="Changed" maxlength="160" autocomplete="organization"
+                                       aria-invalid="@Invalid("organization")" aria-describedby="@Describe("organization")" data-testid="wizard-organization" />
+                                <FieldError For="organization" Messages="@Errs("organization")" />
+                            </div>
+                            <div class="field">
+                                <label for="email">Contact email</label>
+                                <input id="email" type="email" @bind="_applicant.Email" @bind:event="oninput" @bind:after="Changed" maxlength="254" autocomplete="email"
+                                       aria-invalid="@Invalid("email")" aria-describedby="@Describe("email", "contact-hint")" data-testid="wizard-email" />
+                                <FieldError For="email" Messages="@Errs("email")" />
+                            </div>
+                            <div class="field">
+                                <label for="phone">Contact phone</label>
+                                <input id="phone" type="tel" @bind="_applicant.Phone" @bind:event="oninput" @bind:after="Changed" maxlength="30" autocomplete="tel"
+                                       aria-invalid="@Invalid("phone")" aria-describedby="@Describe("phone", "contact-hint")" data-testid="wizard-phone" />
+                                <FieldError For="phone" Messages="@Errs("phone")" />
+                            </div>
+                            <p class="field__hint span-2" id="contact-hint">Give at least one contact: email or phone.</p>
+                            <div class="field">
+                                <label for="registryReference">Registry reference <span class="muted">(required)</span></label>
+                                <input id="registryReference" @bind="_applicant.RegistryReference" @bind:event="oninput" @bind:after="Changed" maxlength="40"
+                                       aria-required="true" aria-invalid="@Invalid("registryReference")" aria-describedby="@Describe("registryReference", "registry-hint")" data-testid="wizard-registryReference" />
+                                <span class="field__hint" id="registry-hint">The applicant's reference in the Applicant Registry, for example REF-10001. The reviewer verifies it.</span>
+                                <FieldError For="registryReference" Messages="@Errs("registryReference")" />
+                            </div>
+                        </div>
+                        <StepButtons Step="1" Busy="Busy" OnBack="BackAsync" OnSaveDraft="SaveDraftAsync" />
+                    </form>
+                    break;
+                case 2:
+                    <form class="form" @onsubmit="NextAsync" novalidate data-testid="wizard-form-2">
+                        <div class="form-grid">
+                            <div class="field span-2">
+                                <label for="title">Event title <span class="muted">(required)</span></label>
+                                <input id="title" @bind="_event.Title" @bind:event="oninput" @bind:after="Changed" maxlength="@Limits.TitleMax"
+                                       aria-required="true" aria-invalid="@Invalid("title")" aria-describedby="@Describe("title")" data-testid="wizard-title" />
+                                <FieldError For="title" Messages="@Errs("title")" />
+                            </div>
+                            <div class="field">
+                                <label for="categoryId">Event type <span class="muted">(required)</span></label>
+                                <select id="categoryId" @bind="_event.CategoryId" @bind:after="CategoryChanged" aria-required="true" aria-invalid="@Invalid("categoryId")"
+                                        aria-describedby="@Describe("categoryId", "category-hint")" data-testid="wizard-categoryId">
+                                    <option value="">Choose a type</option>
+                                    @foreach (var c in _lookups.Categories)
+                                    {
+                                        <option value="@c.Id">@c.Name</option>
+                                    }
+                                </select>
+                                <span class="field__hint" id="category-hint">@(SelectedCategory is { } sc ? $"{sc.Description} Documents needed: {DocList(sc.RequiredDocuments)}." : "The type decides which venues and documents apply.")</span>
+                                <FieldError For="categoryId" Messages="@Errs("categoryId")" />
+                            </div>
+                            <div class="field">
+                                <label for="venueId">Venue <span class="muted">(required)</span></label>
+                                <select id="venueId" @bind="_event.VenueId" @bind:after="Changed" aria-required="true" aria-invalid="@Invalid("venueId")"
+                                        aria-describedby="@Describe("venueId", "venue-hint")" data-testid="wizard-venueId">
+                                    <option value="">Choose a venue</option>
+                                    @foreach (var group in AvailableVenues.GroupBy(v => v.CemeteryName))
+                                    {
+                                        <optgroup label="@group.Key">
+                                            @foreach (var v in group)
+                                            {
+                                                <option value="@v.Id">@v.Name (up to @v.Capacity)</option>
+                                            }
+                                        </optgroup>
+                                    }
+                                </select>
+                                <span class="field__hint" id="venue-hint">@(SelectedVenue is { } sv ? $"{sv.Name}, {sv.CemeteryName}: up to {sv.Capacity} attendees. Times are local ({Ui.ShortZone(sv.TimeZoneId)})." : "Only active venues that host the chosen type are listed.")</span>
+                                <FieldError For="venueId" Messages="@Errs("venueId")" />
+                            </div>
+                            <div class="field">
+                                <label for="localDate">Event date <span class="muted">(required)</span></label>
+                                <input id="localDate" type="date" @bind="_event.LocalDate" @bind:after="Changed" aria-required="true" aria-invalid="@Invalid("localDate")"
+                                       aria-describedby="@Describe("localDate")" data-testid="wizard-localDate" />
+                                <FieldError For="localDate" Messages="@Errs("localDate")" />
+                            </div>
+                            <div class="field">
+                                <label for="localStart">Start time <span class="muted">(required)</span></label>
+                                <input id="localStart" type="time" @bind="_event.LocalStart" @bind:after="Changed" aria-required="true" aria-invalid="@Invalid("localStart")"
+                                       aria-describedby="@Describe("localStart")" data-testid="wizard-localStart" />
+                                <FieldError For="localStart" Messages="@Errs("localStart")" />
+                            </div>
+                            <div class="field">
+                                <label for="durationMinutes">Duration in minutes <span class="muted">(required)</span></label>
+                                <input id="durationMinutes" type="number" inputmode="numeric" min="@_minDuration" max="@_maxDuration" step="5" @bind="_event.DurationMinutes" @bind:after="Changed"
+                                       aria-required="true" aria-invalid="@Invalid("durationMinutes")" aria-describedby="@Describe("durationMinutes", "duration-hint")" data-testid="wizard-durationMinutes" />
+                                <span class="field__hint" id="duration-hint">@_minDuration to @_maxDuration minutes.</span>
+                                <FieldError For="durationMinutes" Messages="@Errs("durationMinutes")" />
+                            </div>
+                            <div class="field">
+                                <label for="attendeeCount">Expected attendees <span class="muted">(required)</span></label>
+                                <input id="attendeeCount" type="number" inputmode="numeric" min="1" max="@(SelectedVenue?.Capacity ?? 100000)" @bind="_event.AttendeeCount" @bind:after="Changed"
+                                       aria-required="true" aria-invalid="@Invalid("attendeeCount")" aria-describedby="@Describe("attendeeCount", "venue-hint")" data-testid="wizard-attendeeCount" />
+                                <FieldError For="attendeeCount" Messages="@Errs("attendeeCount")" />
+                            </div>
+                            <div class="field span-2">
+                                <label for="description">Description</label>
+                                <textarea id="description" @bind="_event.Description" @bind:event="oninput" @bind:after="Changed" maxlength="@Limits.DescriptionMax"
+                                          aria-invalid="@Invalid("description")" aria-describedby="@Describe("description")" data-testid="wizard-description"></textarea>
+                                <FieldError For="description" Messages="@Errs("description")" />
+                            </div>
+                        </div>
+                        <StepButtons Step="2" Busy="Busy" OnBack="BackAsync" OnSaveDraft="SaveDraftAsync" />
+                    </form>
+                    break;
+                case 3:
+                    <form class="form" @onsubmit="NextAsync" novalidate data-testid="wizard-form-3">
+                        @if (SavedVenue is null)
+                        {
+                            <div class="alert alert--info" data-testid="wizard-no-venue">
+                                <p>Resources are stocked per cemetery. <a href="@StepUrl(2)" @onclick="() => GoToStepAsync(2)" @onclick:preventDefault>Choose a venue in step 2</a> to see what you can request. You can still record special needs now.</p>
+                            </div>
+                        }
+                        else
+                        {
+                            <fieldset>
+                                <legend>Resources requested at @SavedVenue.CemeteryName</legend>
+                                <p class="field__hint">Enter 0 for anything you do not need. The Scheduling Officer confirms final allocations.</p>
+                                @if (CemeteryResources.Count == 0)
+                                {
+                                    <p>No bookable resources are recorded for this cemetery.</p>
+                                }
+                                <div class="form-grid">
+                                    @foreach (var r in CemeteryResources)
+                                    {
+                                        var key = $"resource-{r.Id}";
+                                        <div class="field">
+                                            <label for="@key">@r.Name (@r.Unit, @r.Total in stock)</label>
+                                            <input id="@key" type="number" inputmode="numeric" min="0" max="@r.Total" value="@Quantity(r.Id)"
+                                                   @onchange="e => SetQuantity(r.Id, e.Value)" aria-invalid="@Invalid(key)" aria-describedby="@Describe(key)" data-testid="@($"wizard-resource-{r.Code}")" />
+                                            <FieldError For="@key" Messages="@Errs(key)" />
+                                        </div>
+                                    }
+                                </div>
+                            </fieldset>
+                        }
+                        <div class="field">
+                            <label for="specialNeeds">Special needs</label>
+                            <textarea id="specialNeeds" @bind="_specialNeeds" @bind:event="oninput" @bind:after="Changed" maxlength="1000"
+                                      aria-invalid="@Invalid("specialNeeds")" aria-describedby="@Describe("specialNeeds", "needs-hint")" data-testid="wizard-specialNeeds"></textarea>
+                            <span class="field__hint" id="needs-hint">Accessibility, seating, parking or other arrangements.</span>
+                            <FieldError For="specialNeeds" Messages="@Errs("specialNeeds")" />
+                        </div>
+                        <StepButtons Step="3" Busy="Busy" OnBack="BackAsync" OnSaveDraft="SaveDraftAsync" />
+                    </form>
+                    break;
+                default:
+                    <div class="stack">
+                        <section aria-labelledby="req-title">
+                            <h3 id="req-title">Required documents</h3>
+                            @if (Required.Count == 0)
+                            {
+                                <p>@(_detail?.Event.CategoryId is null ? "Choose an event type in step 2 to see which documents are required. At least one supporting document is always needed." : "This event type needs no specific document, but at least one supporting document is required.")</p>
+                            }
+                            else
+                            {
+                                <ul class="wizard__required" data-testid="wizard-required">
+                                    @foreach (var doc in Required)
+                                    {
+                                        var files = Documents.Where(d => d.DocumentType == doc).ToList();
+                                        <li>
+                                            @if (files.Count > 0)
+                                            {
+                                                <span class="chip chip--good">Attached</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="chip chip--attention">Missing</span>
+                                            }
+                                            <span>@CaseService.Label(doc)@(files.Count > 0 ? ": " + string.Join(", ", files.Select(f => f.FileName)) : "")</span>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+                        </section>
+
+                        <form class="form wizard__upload" @onsubmit="UploadAsync" novalidate data-testid="wizard-upload-form">
+                            <h3>Upload a document</h3>
+                            <div class="form-grid">
+                                <div class="field">
+                                    <label for="documentType">Document type</label>
+                                    <select id="documentType" @bind="_uploadType" aria-invalid="@Invalid("documentType")" aria-describedby="@Describe("documentType")" data-testid="wizard-doctype">
+                                        @foreach (var t in Enum.GetValues<DocumentType>())
+                                        {
+                                            <option value="@t">@CaseService.Label(t)</option>
+                                        }
+                                    </select>
+                                    <FieldError For="documentType" Messages="@Errs("documentType")" />
+                                </div>
+                                <div class="field">
+                                    <label for="file">File</label>
+                                    <InputFile id="file" @key="_fileKey" OnChange="FileChosen" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                                               aria-invalid="@FileInvalid" aria-describedby="@FileDescribedBy" data-testid="wizard-file" />
+                                    <span class="field__hint" id="file-hint">PDF, PNG or JPG, at most 5 MiB.</span>
+                                    <FieldError For="file" Messages="FileErrors" />
+                                </div>
+                            </div>
+                            <div><button type="submit" class="btn" disabled="@Busy" data-testid="wizard-upload">Upload document</button></div>
+                        </form>
+
+                        <section aria-labelledby="docs-title">
+                            <h3 id="docs-title">Uploaded documents</h3>
+                            @if (Documents.Count == 0)
+                            {
+                                <EmptyState Title="No documents uploaded yet"><p>Upload the required documents above.</p></EmptyState>
+                            }
+                            else
+                            {
+                                <div class="table-wrap">
+                                    <table class="table table--cards table--compact" data-testid="wizard-documents">
+                                        <thead><tr><th scope="col">File</th><th scope="col">Type</th><th scope="col">Size</th><th scope="col">Uploaded</th><th scope="col">Download</th></tr></thead>
+                                        <tbody>
+                                            @foreach (var d in Documents)
+                                            {
+                                                <tr>
+                                                    <td data-label="File">@d.FileName</td>
+                                                    <td data-label="Type">@CaseService.Label(d.DocumentType)</td>
+                                                    <td data-label="Size">@Size(d.SizeBytes)</td>
+                                                    <td data-label="Uploaded">@Ui.Utc(d.UploadedAt)</td>
+                                                    <td data-label="Download"><DocumentLink Attachment="d" /></td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        </section>
+
+                        <section aria-labelledby="ready-title" data-testid="wizard-readiness">
+                            <h3 id="ready-title">Ready to submit?</h3>
+                            @if (_detail?.Status == CaseStatus.NeedsInformation)
+                            {
+                                <p>This application is waiting for information. Answer the request in the <a href="information-requests">Request Information Inbox</a>, then resubmit from the <a href="@($"applications/{_id}")">application page</a>.</p>
+                            }
+                            else if (_submissionProblems.Count > 0)
+                            {
+                                <p>Fix these before submitting:</p>
+                                <ul data-testid="wizard-problems">
+                                    @foreach (var p in _submissionProblems)
+                                    {
+                                        <li>@p</li>
+                                    }
+                                </ul>
+                            }
+                            else
+                            {
+                                <p class="alert alert--success" data-testid="wizard-ready">Everything required is in place. Submitting sends the application for eligibility review; you cannot edit it afterwards unless the reviewer asks for information.</p>
+                            }
+                            <div class="row">
+                                <button type="button" class="btn" @onclick="BackAsync" disabled="@Busy">Back</button>
+                                @if (_detail?.Status != CaseStatus.NeedsInformation)
+                                {
+                                    <button type="button" class="btn btn--primary" @onclick="SubmitAsync" disabled="@(Busy || _submitting || _id is null)" data-testid="wizard-submit">
+                                        @(_submitting ? "Submitting…" : "Submit application")
+                                    </button>
+                                }
+                            </div>
+                        </section>
+                    </div>
+                    break;
+            }
+        </section>
+
+        <aside class="card wizard__aside" aria-labelledby="aside-title">
+            @if (_id is null)
+            {
+                <h2 id="aside-title">Resume a draft</h2>
+                @if (_drafts.Count == 0)
+                {
+                    <p data-testid="wizard-no-drafts">You have no saved drafts. Start typing and a draft is created for you.</p>
+                }
+                else
+                {
+                    <ul class="wizard__drafts" data-testid="wizard-drafts">
+                        @foreach (var d in _drafts)
+                        {
+                            <li><a href="@($"applications/new/{d.Id}/step/1")">@d.Reference</a> <span class="muted">@(string.IsNullOrWhiteSpace(d.Title) ? "Untitled" : d.Title) · updated @Ui.Utc(d.UpdatedAt)</span></li>
+                        }
+                    </ul>
+                }
+            }
+            else
+            {
+                <h2 id="aside-title">Draft @_reference</h2>
+                <dl class="dl">
+                    <dt>Status</dt><dd>@(_detail is null ? "Draft" : Workflow.Display(_detail.Status))</dd>
+                    <dt>Last saved</dt><dd>@(_savedAt is { } s ? Ui.Utc(s) : "Not yet")</dd>
+                    <dt>Documents</dt><dd>@Documents.Count</dd>
+                </dl>
+                <p><a href="@($"applications/{_id}")">Open the application page</a></p>
+            }
+        </aside>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid? Id { get; set; }
+    [Parameter] public int? Step { get; set; }
+
+    private sealed class ApplicantForm
+    {
+        public string? FullName { get; set; }
+        public string? Organization { get; set; }
+        public string? Email { get; set; }
+        public string? Phone { get; set; }
+        public string? RegistryReference { get; set; }
+    }
+
+    private sealed class EventForm
+    {
+        public string? Title { get; set; }
+        public Guid? CategoryId { get; set; }
+        public Guid? VenueId { get; set; }
+        public DateOnly? LocalDate { get; set; }
+        public TimeOnly? LocalStart { get; set; }
+        public int? DurationMinutes { get; set; }
+        public int? AttendeeCount { get; set; }
+        public string? Description { get; set; }
+    }
+
+    private static readonly (int N, string Label)[] StepNames = [(1, "Applicant"), (2, "Event"), (3, "Facilities"), (4, "Supporting documents")];
+
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+    private readonly string _requestKey = Guid.NewGuid().ToString("N");
+    private CancellationTokenSource? _debounce;
+    private IntakeLookups? _lookups;
+    private CaseDetail? _detail;
+    private Guid? _id;
+    private Guid? _loadedId;
+    private string? _reference;
+    private uint _version;
+    private int _wizardStep = 1;
+    private ApplicantForm _applicant = new();
+    private EventForm _event = new();
+    private Dictionary<Guid, int> _quantities = [];
+    private string? _specialNeeds;
+    private bool _dirty;
+    private bool _quietProblem;
+    private DateTimeOffset? _savedAt;
+    private string? _saveStatus;
+    private IReadOnlyList<RegisterRow> _drafts = [];
+    private IReadOnlyList<string> _submissionProblems = [];
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+    private CaseDetail? _fresh;
+    private int _minDuration = 30, _maxDuration = 300;
+    private DocumentType _uploadType = DocumentType.ProofOfAffiliation;
+    private IBrowserFile? _file;
+    private int _fileKey;
+    private bool _submitting;
+
+    private int CurrentStep => _id is null ? 1 : Math.Clamp(Step ?? 1, 1, 4);
+    private string StepUrl(int n) => $"applications/new/{_id}/step/{n}";
+    private CategoryOption? SelectedCategory => _lookups?.Categories.FirstOrDefault(c => c.Id == _event.CategoryId);
+    private VenueOption? SelectedVenue => _lookups?.Venues.FirstOrDefault(v => v.Id == _event.VenueId);
+    private VenueOption? SavedVenue => _lookups?.Venues.FirstOrDefault(v => v.Id == _detail?.Event.VenueId);
+    private IEnumerable<VenueOption> AvailableVenues => (_lookups?.Venues ?? []).Where(v => (v.IsActive || v.Id == _event.VenueId)
+        && (SelectedCategory is null || v.Categories.Count == 0 || v.Categories.Contains(SelectedCategory.Code)));
+    private List<ResourceOption> CemeteryResources => (_lookups?.Resources ?? []).Where(r => r.CemeteryId == SavedVenue?.CemeteryId).ToList();
+    private IReadOnlyList<DocumentType> Required => _detail?.Event.RequiredDocuments ?? [];
+    private IReadOnlyList<AttachmentView> Documents => _detail?.Documents.Where(d => d.Purpose == AttachmentPurpose.ApplicationDocument).ToList() ?? [];
+    private IReadOnlyList<string> FileErrors => [.. Errs("file"), .. (Problem?.Code == ErrorCodes.AttachmentRejected ? [Problem.Title] : Array.Empty<string>())];
+    private string? FileInvalid => FileErrors.Count > 0 ? "true" : null;
+    private string FileDescribedBy => FileErrors.Count > 0 ? "file-hint file-error" : "file-hint";
+
+    private bool IsDone(int n) => n < 4
+        ? _wizardStep > n
+        : Documents.Count > 0 && Required.All(r => Documents.Any(d => d.DocumentType == r));
+
+    private static string DocList(IReadOnlyList<DocumentType> docs) => docs.Count == 0 ? "any supporting document" : string.Join(", ", docs.Select(CaseService.Label));
+
+    private int Quantity(Guid resourceId) => _quantities.TryGetValue(resourceId, out var q) ? q : 0;
+
+    private void SetQuantity(Guid resourceId, object? value)
+    {
+        _quantities[resourceId] = int.TryParse(value?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var q) ? q : 0;
+        Changed();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _minDuration = await Rules.IntAsync(RuleKeys.MinDurationMinutes);
+        _maxDuration = await Rules.IntAsync(RuleKeys.MaxDurationMinutes);
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Id is null && _id is null)
+        {
+            await LoadAsync(async a =>
+            {
+                _lookups ??= await Cases.LookupsAsync(a);
+                _drafts = (await Register.ListAsync(a, new RegisterQuery(MyDrafts: true))).Rows;
+            });
+            return;
+        }
+        if (Id is { } id && id != _loadedId)
+        {
+            Problem = null;
+            await LoadAsync(async a =>
+            {
+                _lookups ??= await Cases.LookupsAsync(a);
+                await LoadCaseAsync(a, id);
+            });
+        }
+        if (CurrentStep == 4 && _id is { } current && _detail?.Edit.Applicant == true)
+            await LoadAsync(async a => _submissionProblems = await Cases.SubmissionProblemsAsync(a, current));
+    }
+
+    private async Task LoadCaseAsync(Actor a, Guid id)
+    {
+        var d = await Cases.GetAsync(a, id);
+        _detail = d;
+        _id = d.Id;
+        _loadedId = d.Id;
+        _reference = d.Reference;
+        _version = d.Version;
+        _wizardStep = d.WizardStep;
+        _savedAt ??= d.UpdatedAt;
+        Fill(d);
+        _dirty = false;
+    }
+
+    private void Fill(CaseDetail d)
+    {
+        _applicant = new ApplicantForm
+        {
+            FullName = d.Applicant.FullName, Organization = d.Applicant.Organization, Email = d.Applicant.Email, Phone = d.Applicant.Phone,
+            RegistryReference = d.Applicant.RegistryReference,
+        };
+        DateOnly? date = null;
+        TimeOnly? start = null;
+        if (d.Event.StartUtc is { } s)
+        {
+            var local = TimeZoneInfo.ConvertTime(s, Ui.Zone(d.Event.TimeZoneId));
+            date = DateOnly.FromDateTime(local.DateTime);
+            start = TimeOnly.FromDateTime(local.DateTime);
+        }
+        _event = new EventForm
+        {
+            Title = d.Event.Title, CategoryId = d.Event.CategoryId, VenueId = d.Event.VenueId, LocalDate = date, LocalStart = start,
+            DurationMinutes = d.Event.DurationMinutes, AttendeeCount = d.Event.AttendeeCount, Description = d.Event.Description,
+        };
+        _quantities = d.RequestedResources.ToDictionary(r => r.ResourceId, r => r.Quantity);
+        _specialNeeds = d.Event.SpecialNeeds;
+    }
+
+    // ------------------------------------------------------------------ autosave (E4-01 AC3)
+
+    private void Changed()
+    {
+        _dirty = true;
+        _saveStatus = "Unsaved changes";
+        _debounce?.Cancel();
+        _debounce = new CancellationTokenSource();
+        var token = _debounce.Token;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), token);
+                await InvokeAsync(AutosaveAsync);
+            }
+            catch (OperationCanceledException)
+            {
+                // a newer change restarted the idle timer
+            }
+        }, CancellationToken.None);
+    }
+
+    private void CategoryChanged()
+    {
+        if (SelectedVenue is { } v && SelectedCategory is { } c && v.Categories.Count > 0 && !v.Categories.Contains(c.Code)) _event.VenueId = null;
+        Changed();
+    }
+
+    private bool HasAnyInput => CurrentStep switch
+    {
+        1 => new[] { _applicant.FullName, _applicant.Organization, _applicant.Email, _applicant.Phone, _applicant.RegistryReference }.Any(x => !string.IsNullOrWhiteSpace(x)),
+        _ => true,
+    };
+
+    /// <summary>Quiet save after 2 s idle: field errors are shown next to the fields, focus is not moved.</summary>
+    private async Task AutosaveAsync()
+    {
+        if (!_dirty || _conflictRows is not null || Busy) return;
+        if (_id is null && !HasAnyInput) return;
+        var id = Correlation.BeginOperation();
+        try
+        {
+            var actor = await GetActorAsync();
+            await SaveCoreAsync(actor, complete: false);
+            Problem = null;
+            _quietProblem = false;
+            _saveStatus = $"Draft saved at {Ui.LocalTime(_savedAt!.Value, null)} UTC";
+        }
+        catch (AppException ex)
+        {
+            await HandleSaveErrorAsync(ex, id, quiet: true);
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>Creates the draft on first save (idempotent request key), then saves the current step.</summary>
+    private async Task SaveCoreAsync(Actor a, bool complete)
+    {
+        await _saveLock.WaitAsync();
+        try
+        {
+            var created = false;
+            if (_id is null)
+            {
+                var draft = await Cases.CreateDraftAsync(a, _requestKey);
+                _id = draft.Id;
+                _loadedId = draft.Id;
+                _reference = draft.Reference;
+                _version = draft.Version;
+                created = true;
+            }
+            try
+            {
+                var id = _id.Value;
+                CaseRef result = CurrentStep switch
+                {
+                    1 => await Cases.SaveApplicantAsync(a, id, _version,
+                        new ApplicantInput(_applicant.FullName, _applicant.Organization, _applicant.Email, _applicant.Phone, _applicant.RegistryReference), complete),
+                    2 => await Cases.SaveEventAsync(a, id, _version,
+                        new EventInput(_event.Title, _event.CategoryId, _event.VenueId, _event.LocalDate, _event.LocalStart, _event.DurationMinutes, _event.AttendeeCount, _event.Description), complete),
+                    3 => await Cases.SaveFacilitiesAsync(a, id, _version,
+                        new FacilitiesInput(_quantities.Select(q => new ResourceRequestInput(q.Key, q.Value)).ToList(), _specialNeeds), complete),
+                    _ => new CaseRef(id, _reference!, _detail?.Status ?? CaseStatus.Draft, _version),
+                };
+                _version = result.Version;
+                _dirty = false;
+                _savedAt = Clock.GetUtcNow();
+                _wizardStep = Math.Max(_wizardStep, complete ? CurrentStep + 1 : CurrentStep);
+                _detail = await Cases.GetAsync(a, id);
+            }
+            finally
+            {
+                // The draft exists from now on: keep its address so a reload never creates a second one.
+                if (created) Nav.NavigateTo(StepUrl(1), replace: true);
+            }
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
+    }
+
+    private async Task HandleSaveErrorAsync(AppException ex, string correlationId, bool quiet)
+    {
+        Problem = UiProblem.From(ex, correlationId);
+        _quietProblem = quiet && ex is ValidationException;
+        _saveStatus = ex is ValidationException ? "Draft not saved: check the highlighted fields." : "Draft not saved.";
+        if (ex is ConflictException) await BuildConflictAsync();
+    }
+
+    // ------------------------------------------------------------------ explicit actions
+
+    private async Task SaveDraftAsync()
+    {
+        _debounce?.Cancel();
+        _quietProblem = false;
+        if (await RunAsync(a => SaveCoreAsync(a, complete: false), null))
+        {
+            _saveStatus = $"Draft saved at {Ui.LocalTime(_savedAt!.Value, null)} UTC";
+            Announcement = $"Draft {_reference} saved.";
+        }
+        else await AfterFailedRunAsync();
+    }
+
+    private async Task NextAsync()
+    {
+        _debounce?.Cancel();
+        _quietProblem = false;
+        if (await RunAsync(a => SaveCoreAsync(a, complete: true), null))
+        {
+            _saveStatus = $"Draft saved at {Ui.LocalTime(_savedAt!.Value, null)} UTC";
+            Nav.NavigateTo(StepUrl(Math.Min(4, CurrentStep + 1)));
+        }
+        else await AfterFailedRunAsync();
+    }
+
+    private async Task BackAsync() => await GoToStepAsync(Math.Max(1, CurrentStep - 1));
+
+    /// <summary>Changing step saves pending edits first (E4-01 AC3); a failed save keeps the user on the step.</summary>
+    private async Task GoToStepAsync(int step)
+    {
+        _debounce?.Cancel();
+        _quietProblem = false;
+        if (_dirty && !await RunAsync(a => SaveCoreAsync(a, complete: false), null))
+        {
+            await AfterFailedRunAsync();
+            return;
+        }
+        if (_id is not null) Nav.NavigateTo(StepUrl(step));
+    }
+
+    private async Task AfterFailedRunAsync()
+    {
+        _saveStatus = Problem?.StatusCode == 400 ? "Not saved: check the highlighted fields." : "Not saved.";
+        if (Problem?.StatusCode == 409) await BuildConflictAsync();
+    }
+
+    private void FileChosen(InputFileChangeEventArgs e) => _file = e.File;
+
+    private async Task UploadAsync()
+    {
+        if (_file is null)
+        {
+            LocalError("file", "Choose a file to upload.");
+            return;
+        }
+        if (_file.Size > Limits.MaxAttachmentBytes)
+        {
+            LocalError("file", $"The file is larger than 5 MiB ({Limits.MaxAttachmentBytes:N0} bytes).");
+            return;
+        }
+        var file = _file;
+        var type = _uploadType;
+        if (await RunAsync(async a =>
+            {
+                await using var stream = file.OpenReadStream(Limits.MaxAttachmentBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                await _saveLock.WaitAsync();
+                try
+                {
+                    var result = await Cases.UploadDocumentAsync(a, _id!.Value, _version, type, new UploadFile(file.Name, file.ContentType, buffer.ToArray()));
+                    _version = result.Version;
+                    _detail = await Cases.GetAsync(a, result.Id);
+                    _submissionProblems = await Cases.SubmissionProblemsAsync(a, result.Id);
+                }
+                finally
+                {
+                    _saveLock.Release();
+                }
+            }, $"{file.Name} uploaded as {CaseService.Label(type)}."))
+        {
+            _file = null;
+            _fileKey++;
+            var missing = Required.FirstOrDefault(r => Documents.All(d => d.DocumentType != r), DocumentType.Other);
+            _uploadType = missing;
+        }
+        else await AfterFailedRunAsync();
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (_id is not { } id || _submitting) return;
+        _submitting = true;
+        try
+        {
+            if (await RunAsync(async a =>
+                {
+                    await _saveLock.WaitAsync();
+                    try
+                    {
+                        await Cases.SubmitAsync(a, id, _version);
+                    }
+                    finally
+                    {
+                        _saveLock.Release();
+                    }
+                }, null))
+            {
+                Nav.NavigateTo($"applications/{id}?submitted=1");
+                return;
+            }
+            await AfterFailedRunAsync();
+            await LoadAsync(async a => _submissionProblems = await Cases.SubmissionProblemsAsync(a, id));
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    // ------------------------------------------------------------------ stale writes (E2-05)
+
+    private async Task BuildConflictAsync()
+    {
+        if (_id is not { } id) return;
+        try
+        {
+            var fresh = await Cases.GetAsync(await GetActorAsync(), id);
+            _fresh = fresh;
+            var rows = new List<ConflictPanel.Row>();
+            void Add(string field, string? saved, string? mine) => rows.Add(new ConflictPanel.Row(field, saved, mine));
+            switch (CurrentStep)
+            {
+                case 1:
+                    Add("Applicant name", fresh.Applicant.FullName, _applicant.FullName);
+                    Add("Organisation", fresh.Applicant.Organization, _applicant.Organization);
+                    Add("Email", fresh.Applicant.Email, _applicant.Email);
+                    Add("Phone", fresh.Applicant.Phone, _applicant.Phone);
+                    Add("Registry reference", fresh.Applicant.RegistryReference, _applicant.RegistryReference);
+                    break;
+                case 2:
+                    Add("Event title", fresh.Event.Title, _event.Title);
+                    Add("Event type", fresh.Event.CategoryName, SelectedCategory?.Name);
+                    Add("Venue", fresh.Event.VenueName, SelectedVenue?.Name);
+                    Add("Start", fresh.Event.StartUtc is { } s ? Local(s, fresh.Event.TimeZoneId) : null, _event.LocalDate is { } d && _event.LocalStart is { } t ? $"{d:ddd d MMM yyyy}, {t:HH:mm}" : null);
+                    Add("Duration (minutes)", fresh.Event.DurationMinutes?.ToString(CultureInfo.InvariantCulture), _event.DurationMinutes?.ToString(CultureInfo.InvariantCulture));
+                    Add("Attendees", fresh.Event.AttendeeCount?.ToString(CultureInfo.InvariantCulture), _event.AttendeeCount?.ToString(CultureInfo.InvariantCulture));
+                    break;
+                case 3:
+                    Add("Resources", string.Join(", ", fresh.RequestedResources.Select(r => $"{r.Quantity} {r.Name}")),
+                        string.Join(", ", _quantities.Where(q => q.Value > 0).Select(q => $"{q.Value} {_lookups?.Resources.FirstOrDefault(r => r.Id == q.Key)?.Name}")));
+                    Add("Special needs", fresh.Event.SpecialNeeds, _specialNeeds);
+                    break;
+                default:
+                    Add("Documents", string.Join(", ", fresh.Documents.Select(x => x.FileName)), string.Join(", ", Documents.Select(x => x.FileName)));
+                    break;
+            }
+            Add("Status", Workflow.Display(fresh.Status), _detail is null ? null : Workflow.Display(_detail.Status));
+            _conflictRows = rows;
+        }
+        catch (AppException ex)
+        {
+            Problem = UiProblem.From(ex, Correlation.BeginOperation());
+        }
+    }
+
+    private async Task ReloadSavedAsync()
+    {
+        if (_id is not { } id) return;
+        _conflictRows = null;
+        Problem = null;
+        await LoadAsync(a => LoadCaseAsync(a, id));
+        _saveStatus = "Reloaded the saved version.";
+        Announcement = "Reloaded the saved version. Your unsaved changes were discarded.";
+    }
+
+    private async Task ReapplyAsync()
+    {
+        if (_fresh is null) return;
+        _version = _fresh.Version;
+        _detail = _fresh;
+        _conflictRows = null;
+        if (await RunAsync(a => SaveCoreAsync(a, complete: false), "Your changes were re-applied on top of the saved version."))
+            _saveStatus = $"Draft saved at {Ui.LocalTime(_savedAt!.Value, null)} UTC";
+        else await AfterFailedRunAsync();
+    }
+
+    public void Dispose()
+    {
+        _debounce?.Cancel();
+        _debounce?.Dispose();
+        _saveLock.Dispose();
+    }
+}

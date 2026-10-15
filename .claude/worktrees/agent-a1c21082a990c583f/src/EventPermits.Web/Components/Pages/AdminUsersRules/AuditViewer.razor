@@ -1,0 +1,182 @@
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject AdminService Admin
+
+<section class="card card--flush ur-section" id="audit" aria-labelledby="audit-title" data-testid="ur-audit">
+    <div class="ur-section__head">
+        <h2 id="audit-title">Audit log</h2>
+        <p class="muted">Append-only record of every change, download and integration action, newest first. Read-only for everyone.</p>
+    </div>
+    <div class="ur-pad">
+        <ProblemAlert Problem="Problem" OnRetry="SearchAsync" />
+        <LiveRegion Message="@Announcement" Visible="false" />
+    </div>
+
+    <form class="filters ur-filters" @onsubmit="ApplyAsync" @onsubmit:preventDefault novalidate data-testid="audit-filters">
+        <div class="field">
+            <label for="aud-from">From</label>
+            <input id="aud-from" type="date" @bind="_from" aria-invalid="@Invalid("from")" aria-describedby="aud-from-error" data-testid="audit-from" />
+            <span id="aud-from-error" class="field__error">@Msg("from")</span>
+        </div>
+        <div class="field">
+            <label for="aud-to">To</label>
+            <input id="aud-to" type="date" @bind="_to" aria-invalid="@Invalid("to")" aria-describedby="aud-to-error" data-testid="audit-to" />
+            <span id="aud-to-error" class="field__error" data-testid="audit-to-error">@Msg("to")</span>
+        </div>
+        <div class="field">
+            <label for="aud-actor">Actor</label>
+            <input id="aud-actor" @bind="_actor" maxlength="120" autocomplete="off" aria-invalid="@Invalid("actor")" aria-describedby="aud-actor-error" data-testid="audit-actor" />
+            <span id="aud-actor-error" class="field__error">@Msg("actor")</span>
+        </div>
+        <div class="field">
+            <label for="aud-entity">Entity type</label>
+            <select id="aud-entity" @bind="_entity" data-testid="audit-entity">
+                <option value="">All</option>
+                @foreach (var t in _facets?.EntityTypes ?? [])
+                {
+                    <option value="@t">@t</option>
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="aud-action">Action</label>
+            <select id="aud-action" @bind="_action" data-testid="audit-action">
+                <option value="">All</option>
+                @foreach (var a in _facets?.ActionGroups ?? [])
+                {
+                    <option value="@a">@a.*</option>
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="aud-corr">Correlation ID</label>
+            <input id="aud-corr" @bind="_correlation" maxlength="64" autocomplete="off" aria-invalid="@Invalid("correlationId")" aria-describedby="aud-corr-error" data-testid="audit-correlation" />
+            <span id="aud-corr-error" class="field__error">@Msg("correlationId")</span>
+        </div>
+        <div class="field">
+            <label for="aud-ref">Case reference</label>
+            <input id="aud-ref" @bind="_reference" maxlength="20" autocomplete="off" aria-invalid="@Invalid("reference")" aria-describedby="aud-ref-error" data-testid="audit-reference" />
+            <span id="aud-ref-error" class="field__error">@Msg("reference")</span>
+        </div>
+        <div class="field ur-filter-buttons">
+            <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="audit-apply">Apply filters</button>
+            <button type="button" class="btn" disabled="@Busy" @onclick="ClearAsync">Clear</button>
+        </div>
+    </form>
+
+    <div class="ur-pad ur-audit-bar">
+        <span data-testid="audit-total">@Ui.Plural(_total, "event", "events") match.</span>
+        @if (Me?.Can(Cap.ExportAudit) == true)
+        {
+            <a class="btn btn--small" href="@ExportHref" download data-testid="audit-export">Export filtered audit (CSV)</a>
+        }
+    </div>
+
+    @if (_rows.Count == 0)
+    {
+        <div class="ur-pad"><EmptyState Title="No audit events match the filters" /></div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table table--cards table--compact" data-testid="audit-table">
+                <caption class="visually-hidden">Audit events, newest first</caption>
+                <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Entity</th><th scope="col">Summary</th><th scope="col">Correlation</th></tr></thead>
+                <tbody>
+                    @foreach (var r in _rows)
+                    {
+                        <tr data-testid="audit-row">
+                            <td data-label="Time (UTC)">@Ui.Utc(r.At)</td>
+                            <td data-label="Actor">@r.ActorName</td>
+                            <td data-label="Action" class="mono">@r.Action</td>
+                            <td data-label="Entity" class="ur-wrap">@r.EntityType@(r.Reference is not null ? $" · {r.Reference}" : "")</td>
+                            <td data-label="Summary" class="ur-wrap">@r.Summary@if (!string.IsNullOrEmpty(r.Reason)) {<br /><span class="muted">Reason: @r.Reason</span>}</td>
+                            <td data-label="Correlation">
+                                @if (string.IsNullOrEmpty(r.CorrelationId))
+                                {
+                                    <span class="muted">—</span>
+                                }
+                                else
+                                {
+                                    <button type="button" class="btn btn--small btn--quiet ur-corr" @onclick="() => ByCorrelationAsync(r.CorrelationId)" title="Show every event with this correlation ID">@r.CorrelationId[..Math.Min(10, r.CorrelationId.Length)]…<span class="visually-hidden"> show all events with correlation ID @r.CorrelationId</span></button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <Pager Page="_page" Total="_total" OnPage="PageAsync" />
+    }
+</section>
+
+@code {
+    private AuditFacets? _facets;
+    private IReadOnlyList<AuditRow> _rows = [];
+    private int _total;
+    private int _page = 1;
+    private DateOnly? _from;
+    private DateOnly? _to;
+    private string _actor = "";
+    private string _entity = "";
+    private string _action = "";
+    private string _correlation = "";
+    private string _reference = "";
+    private AuditFilter _applied = new();
+
+    protected override Task OnInitializedAsync() => LoadAsync(async actor =>
+    {
+        _facets = await Admin.AuditFacetsAsync(actor);
+        (_rows, _total) = await Admin.SearchAuditAsync(actor, _applied);
+    });
+
+    private AuditFilter Current(int page) => new(_from, _to, Blank(_actor), Blank(_entity), Blank(_action), Blank(_correlation), Blank(_reference), page);
+
+    private static string? Blank(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    private async Task SearchWithAsync(AuditFilter filter)
+    {
+        if (await RunAsync(async actor => (_rows, _total) = await Admin.SearchAuditAsync(actor, filter)))
+        {
+            _applied = filter;
+            _page = filter.Page;
+            Announcement = $"{Ui.Plural(_total, "audit event", "audit events")} match.";
+        }
+    }
+
+    private Task ApplyAsync() => SearchWithAsync(Current(1));
+    private Task SearchAsync() => SearchWithAsync(_applied);
+    private Task PageAsync(int page) => SearchWithAsync(_applied with { Page = page });
+
+    private Task ByCorrelationAsync(string id)
+    {
+        _correlation = id;
+        return ApplyAsync();
+    }
+
+    private Task ClearAsync()
+    {
+        _from = _to = null;
+        _actor = _entity = _action = _correlation = _reference = "";
+        return ApplyAsync();
+    }
+
+    private string? Msg(string field) => Problem?.For(field) is { Length: > 0 } m ? string.Join(" ", m) : null;
+
+    private string ExportHref
+    {
+        get
+        {
+            var f = _applied;
+            var q = new List<string>();
+            if (f.From is { } from) q.Add($"from={from:yyyy-MM-dd}");
+            if (f.To is { } to) q.Add($"to={to:yyyy-MM-dd}");
+            if (f.Actor is { } a) q.Add($"actor={Uri.EscapeDataString(a)}");
+            if (f.EntityType is { } e) q.Add($"entityType={Uri.EscapeDataString(e)}");
+            if (f.Action is { } ac) q.Add($"action={Uri.EscapeDataString(ac)}");
+            if (f.CorrelationId is { } c) q.Add($"correlationId={Uri.EscapeDataString(c)}");
+            if (f.Reference is { } r) q.Add($"reference={Uri.EscapeDataString(r)}");
+            return "/api/audit/export.csv" + (q.Count > 0 ? "?" + string.Join("&", q) : "");
+        }
+    }
+}

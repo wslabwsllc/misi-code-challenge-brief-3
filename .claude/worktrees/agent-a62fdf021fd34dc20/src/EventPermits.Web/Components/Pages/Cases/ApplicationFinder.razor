@@ -1,0 +1,76 @@
+@page "/applications/detail"
+@attribute [Authorize(Policy = Cap.ViewRegister)]
+@rendermode InteractiveServer
+@inherits CasesPage
+@using EventPermits.Application.Services
+@inject CaseService Cases
+@inject RegisterService Register
+
+<PageTitle>Application Detail · Memorial Event Operations</PageTitle>
+<PageHeader Title="Application Detail" Parent="@(("Application Register", "/applications"))"
+            Lead="Open one case by its reference to see the full record, its timeline, comments and the actions you may take." />
+<ProblemAlert Problem="Problem" />
+<InteractiveMarker />
+
+<div class="split">
+    <section class="card" aria-labelledby="find-title">
+        <h2 id="find-title">Find a case</h2>
+        <form class="form" @onsubmit="FindAsync" novalidate data-testid="finder-form">
+            <div class="field">
+                <label for="reference">Case reference</label>
+                <input id="reference" @bind="_reference" maxlength="40" autocomplete="off" placeholder="APP-2026-00001"
+                       aria-invalid="@Invalid("reference")" aria-describedby="@Describe("reference", "reference-hint")" data-testid="finder-reference" />
+                <span class="field__hint" id="reference-hint">The APP-YYYY-NNNNN number from the register, a notification or the permit.</span>
+                <FieldError For="reference" Messages="@Errs("reference")" />
+            </div>
+            <div><button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="finder-open">Open case</button></div>
+        </form>
+    </section>
+
+    <section class="card" aria-labelledby="recent-title">
+        <h2 id="recent-title">Recently updated</h2>
+        @if (Loading)
+        {
+            <p role="status">Loading…</p>
+        }
+        else if (_recent.Count == 0)
+        {
+            <EmptyState Title="No cases you can see yet"><p>Cases appear here once they are created.</p></EmptyState>
+        }
+        else
+        {
+            <ul class="finder__recent" data-testid="finder-recent">
+                @foreach (var r in _recent)
+                {
+                    <li>
+                        <a href="@($"applications/{r.Id}")">@r.Reference</a> <StatusChip Status="r.Status" />
+                        <span class="muted">@(string.IsNullOrWhiteSpace(r.Title) ? "Untitled" : r.Title)</span>
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+</div>
+
+@code {
+    private string? _reference;
+    private IReadOnlyList<RegisterRow> _recent = [];
+
+    protected override Task OnInitializedAsync() => LoadAsync(async a => _recent = (await Register.ListAsync(a, new RegisterQuery())).Rows.Take(10).ToList());
+
+    private async Task FindAsync()
+    {
+        var term = _reference?.Trim();
+        if (string.IsNullOrEmpty(term))
+        {
+            LocalError("reference", "Enter a case reference.");
+            return;
+        }
+        Guid? found = null;
+        if (await RunAsync(async a => found = await Cases.FindAsync(a, term), null))
+        {
+            if (found is { } id) Nav.NavigateTo($"applications/{id}");
+            else LocalError("reference", $"No case {term.ToUpperInvariant()} exists that you are allowed to see. Check the number, or search the register.");
+        }
+    }
+}

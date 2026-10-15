@@ -1,0 +1,243 @@
+@page "/dashboard"
+@attribute [Authorize(Policy = Cap.ViewDashboard)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject DashboardService Dashboards
+
+<PageTitle>Operations Dashboard · Memorial Event Operations</PageTitle>
+<PageHeader Title="Operations Dashboard" Lead="Today's work for your roles. Every number is counted from the live database within what you may see.">
+    <Actions>
+        <button type="button" class="btn" @onclick="ReloadAsync" disabled="@Busy" data-testid="dashboard-refresh">Refresh</button>
+    </Actions>
+</PageHeader>
+<ProblemAlert Problem="Problem" OnRetry="ReloadAsync" />
+<LiveRegion Message="@Announcement" Visible="false" />
+
+@if (Loading && _view is null)
+{
+    <p class="muted" role="status">Loading your dashboard…</p>
+}
+else if (_view is not null && Me is not null)
+{
+    <p class="muted dash-asof" data-testid="dashboard-asof">Counted at @Ui.Utc(_loadedAt).</p>
+
+    @if (_view.Kpis.Count > 0)
+    {
+        <section aria-labelledby="kpi-title">
+            <h2 id="kpi-title" class="visually-hidden">Key figures</h2>
+            <ul class="dash-kpis" role="list">
+                @foreach (var k in _view.Kpis)
+                {
+                    <li>
+                        <a class="kpi @ToneClass(k.Tone)" href="@k.Href" data-testid="@($"kpi-{k.Key}")">
+                            <span class="kpi__value" data-testid="@($"kpi-{k.Key}-value")">@k.Value.ToString("N0", Ui.Culture)</span>
+                            <span class="kpi__label">@k.Label</span>
+                        </a>
+                    </li>
+                }
+            </ul>
+        </section>
+    }
+
+    <div class="dash-grid">
+        @if (Me.Can(Cap.ViewRoster) || Me.Can(Cap.ViewRegister))
+        {
+            <section class="card card--flush dash-panel" aria-labelledby="today-title" data-testid="dashboard-today">
+                <div class="dash-panel__head">
+                    <h2 id="today-title">Today's events</h2>
+                    @if (Me.Can(Cap.ViewRoster))
+                    {
+                        <a href="/operations/roster">Open the roster</a>
+                    }
+                </div>
+                @if (_view.Today.Count == 0)
+                {
+                    <EmptyState Title="No events today">
+                        <p>Nothing is booked at any venue today (venue-local dates).</p>
+                    </EmptyState>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="table table--cards table--compact">
+                            <caption class="visually-hidden">Events starting today, in venue-local time</caption>
+                            <thead><tr><th scope="col">Time</th><th scope="col">Case</th><th scope="col">Event</th><th scope="col">Venue</th><th scope="col">Status</th></tr></thead>
+                            <tbody>
+                                @foreach (var t in _view.Today)
+                                {
+                                    <tr>
+                                        <td data-label="Time">@Ui.LocalTime(t.StartUtc, t.TimeZoneId) <span class="muted">@Ui.ShortZone(t.TimeZoneId)</span></td>
+                                        <td data-label="Case"><a href="@($"/applications/{t.Id}")">@t.Reference</a></td>
+                                        <td data-label="Event">@t.Title</td>
+                                        <td data-label="Venue">@t.Venue</td>
+                                        <td data-label="Status"><StatusChip Status="t.Status" /></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+        }
+
+        <section class="card card--flush dash-panel" aria-labelledby="pending-title" data-testid="dashboard-pending">
+            <div class="dash-panel__head">
+                <h2 id="pending-title">Pending actions</h2>
+                <span class="muted">Oldest first</span>
+            </div>
+            @if (_view.Pending.Count == 0)
+            {
+                <EmptyState Title="Nothing is waiting for you">
+                    <p>@(HasCaseActions ? "No case is waiting on a step your roles perform." : "Your roles do not act on cases; use the pages below.")</p>
+                </EmptyState>
+            }
+            else
+            {
+                <ul class="dash-list" role="list">
+                    @foreach (var p in _view.Pending)
+                    {
+                        <li>
+                            <a href="@p.Href" data-testid="pending-item"><strong>@p.Action</strong> · @p.Reference</a>
+                            <span class="muted">waiting since @Ui.Utc(p.Since)</span>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        @if (Me.Can(Cap.ViewIncidents))
+        {
+            <section class="card card--flush dash-panel" aria-labelledby="incidents-title" data-testid="dashboard-incidents">
+                <div class="dash-panel__head">
+                    <h2 id="incidents-title">Open incidents</h2>
+                    <a href="/incidents?status=Open">All incidents</a>
+                </div>
+                @if (_view.Incidents.Count == 0)
+                {
+                    <EmptyState Title="No open incidents" />
+                }
+                else
+                {
+                    <ul class="dash-list" role="list">
+                        @foreach (var i in _view.Incidents)
+                        {
+                            <li>
+                                <a href="@($"/incidents/{i.Id}")">@i.Reference · @i.Category</a>
+                                <span class="row dash-meta">
+                                    <span class="chip @Ui.SeverityClass(i.Severity)">@i.Severity</span>
+                                    <span class="muted">@i.CaseReference · @i.Status</span>
+                                    @if (i.Overdue)
+                                    {
+                                        <span class="chip chip--bad">Overdue</span>
+                                    }
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+
+        @if (Me.Can(Cap.TrackInformationRequests) || Me.Can(Cap.ViewIncidents))
+        {
+            <section class="card card--flush dash-panel" aria-labelledby="deadlines-title" data-testid="dashboard-deadlines">
+                <div class="dash-panel__head">
+                    <h2 id="deadlines-title">Upcoming deadlines</h2>
+                </div>
+                @if (_view.Deadlines.Count == 0)
+                {
+                    <EmptyState Title="No open deadlines" />
+                }
+                else
+                {
+                    <ul class="dash-list" role="list">
+                        @foreach (var d in _view.Deadlines)
+                        {
+                            <li>
+                                <a href="@d.Href">@d.Label</a>
+                                <span class="row dash-meta">
+                                    <span class="muted">@d.Kind · due @d.Due.ToString("ddd d MMM yyyy", Ui.Culture)</span>
+                                    @if (d.Overdue)
+                                    {
+                                        <span class="chip chip--bad">Overdue</span>
+                                    }
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+
+        @if (Me.Can(Cap.ViewIntegrations))
+        {
+            <section class="card card--flush dash-panel" aria-labelledby="integrations-title" data-testid="dashboard-integrations">
+                <div class="dash-panel__head">
+                    <h2 id="integrations-title">Integration health</h2>
+                    <a href="/integrations">Integration Hub</a>
+                </div>
+                @if (_view.Integrations.Count == 0)
+                {
+                    <EmptyState Title="No degraded or offline integrations">
+                        <p>Every external system's last call succeeded or it has not been called yet.</p>
+                    </EmptyState>
+                }
+                else
+                {
+                    <ul class="dash-list" role="list">
+                        @foreach (var c in _view.Integrations)
+                        {
+                            <li>
+                                <a href="@c.DetailPage">@c.Name</a>
+                                <span class="row dash-meta">
+                                    <span class="chip @(c.Health == IntegrationHealth.Offline ? "chip--bad" : "chip--attention")">@c.Health</span>
+                                    <span class="muted">@c.HealthReason</span>
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+    </div>
+
+    <section class="card dash-pages" aria-labelledby="pages-title">
+        <h2 id="pages-title">Your pages</h2>
+        <ul class="dash-pages__list" role="list">
+            @foreach (var entry in PageCatalog.All.Where(p => Me.Can(p.Capability) && p.Number != 1).OrderBy(p => p.Number))
+            {
+                <li><a href="@entry.Route" data-testid="@($"dash-page-{entry.Number:D2}")"><span class="dash-pages__num" aria-hidden="true">@entry.Number.ToString("D2")</span> @entry.Title</a></li>
+            }
+        </ul>
+    </section>
+}
+
+@code {
+    private DashboardView? _view;
+    private DateTimeOffset _loadedAt;
+
+    private bool HasCaseActions => Me is not null && new[] { Cap.ReviewEligibility, Cap.ManageReservations, Cap.ApproveCases, Cap.ManagePermits, Cap.CloseCases, Cap.RespondToRequests }.Any(Me.Can);
+
+    protected override Task OnInitializedAsync() => LoadAsync(LoadViewAsync);
+
+    private async Task LoadViewAsync(Actor actor)
+    {
+        _view = await Dashboards.GetAsync(actor);
+        _loadedAt = Clock.GetUtcNow();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Problem = null;
+        await RunAsync(LoadViewAsync, "Dashboard refreshed.");
+    }
+
+    private static string ToneClass(string tone) => tone switch
+    {
+        "warn" => "kpi--warn",
+        "danger" => "kpi--danger",
+        "ok" => "kpi--ok",
+        _ => "",
+    };
+}

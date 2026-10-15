@@ -1,0 +1,36 @@
+@* Shown with a 409 (FR-18, E2-05): saved values beside the caller's unsaved ones; nothing is overwritten until the user chooses. *@
+<section class="conflict" aria-labelledby="conflict-title" data-testid="conflict">
+    <h2 id="conflict-title">Someone else saved this record</h2>
+    <p>Your changes were <strong>not</strong> saved. Compare the saved values with yours, then reload the saved version or re-apply your changes on top of it.</p>
+    <div class="table-wrap">
+        <table class="table table--compact">
+            <caption class="visually-hidden">Saved values compared with your unsaved values</caption>
+            <thead><tr><th scope="col">Field</th><th scope="col">Saved now</th><th scope="col">Your unsaved value</th></tr></thead>
+            <tbody>
+                @foreach (var row in Rows)
+                {
+                    <tr class="@(row.Saved != row.Mine ? "conflict__changed" : null)">
+                        <th scope="row">@row.Field</th>
+                        <td>@(string.IsNullOrEmpty(row.Saved) ? "—" : row.Saved)</td>
+                        <td>@(string.IsNullOrEmpty(row.Mine) ? "—" : row.Mine)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <div class="row">
+        <button type="button" class="btn btn--primary" @onclick="OnReload" data-testid="conflict-reload">Reload saved version</button>
+        @if (OnReapply.HasDelegate)
+        {
+            <button type="button" class="btn" @onclick="OnReapply" data-testid="conflict-reapply">Re-apply my changes</button>
+        }
+    </div>
+</section>
+
+@code {
+    public sealed record Row(string Field, string? Saved, string? Mine);
+
+    [Parameter, EditorRequired] public IReadOnlyList<Row> Rows { get; set; } = [];
+    [Parameter] public EventCallback OnReload { get; set; }
+    [Parameter] public EventCallback OnReapply { get; set; }
+}

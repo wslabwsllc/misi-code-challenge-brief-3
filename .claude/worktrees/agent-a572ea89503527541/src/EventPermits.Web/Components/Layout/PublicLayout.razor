@@ -1,0 +1,25 @@
+@inherits LayoutComponentBase
+
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="public-header">
+    <a class="brand" href="/">
+        <span class="brand__mark" aria-hidden="true">✦</span>
+        <span>Memorial Event Operations<span class="brand__sub">Fictional practice system</span></span>
+    </a>
+    <span class="app-header__spacer"></span>
+    <AuthorizeView>
+        <Authorized>
+            <a class="btn-link-light header-link" href="/dashboard">Go to your dashboard</a>
+        </Authorized>
+        <NotAuthorized>
+            <a class="btn-link-light header-link" href="/account/login">Sign in</a>
+        </NotAuthorized>
+    </AuthorizeView>
+</header>
+<main id="main" tabindex="-1">
+    @Body
+</main>
+<footer class="app-footer">
+    Fictional practice exercise — not a VA system. All names, places and records are invented.
+    Version @AppVersion.Current.
+</footer>

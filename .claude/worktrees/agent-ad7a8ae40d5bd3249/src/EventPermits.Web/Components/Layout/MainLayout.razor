@@ -1,0 +1,37 @@
+@inherits LayoutComponentBase
+
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="app-header">
+    <a class="brand" href="/dashboard">
+        <span class="brand__mark" aria-hidden="true">✦</span>
+        <span>Memorial Event Operations<span class="brand__sub">Fictional practice system</span></span>
+    </a>
+    <span class="app-header__spacer"></span>
+    <AuthorizeView>
+        <Authorized>
+            <div class="user-chip">
+                <span>
+                    <strong>@(context.User.FindFirst("display_name")?.Value ?? context.User.Identity?.Name)</strong>
+                    <span class="user-chip__roles">· @string.Join(", ", context.User.Claims.Where(c => c.Type == System.Security.Claims.ClaimTypes.Role).Select(c => Roles.Display(c.Value)))</span>
+                </span>
+                <form method="post" action="/account/logout" data-enhance="false">
+                    <AntiforgeryToken />
+                    <button type="submit" class="btn-link-light" data-testid="sign-out">Sign out</button>
+                </form>
+            </div>
+        </Authorized>
+    </AuthorizeView>
+</header>
+<div class="shell">
+    <aside class="sidebar" aria-label="Main navigation">
+        <NavMenu />
+    </aside>
+    <div>
+        <main id="main" class="main" tabindex="-1">
+            @Body
+        </main>
+        <footer class="app-footer">
+            Fictional practice exercise — not a VA system. All names, places and records are invented.
+        </footer>
+    </div>
+</div>

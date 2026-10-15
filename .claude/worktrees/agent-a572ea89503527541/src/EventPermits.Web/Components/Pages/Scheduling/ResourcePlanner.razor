@@ -1,0 +1,409 @@
+@page "/resources"
+@attribute [Authorize(Policy = Cap.ViewSchedule)]
+@rendermode InteractiveServer
+@inherits SchedulingPage
+@inject SchedulingService Scheduling
+@inject AdminService Admin
+@inject OperationsService Operations
+
+<PageTitle>Resource Planner · Memorial Event Operations</PageTitle>
+<PageHeader Title="Resource Planner" Lead="Chairs, tents, parking attendants, AV kits and other stock per cemetery and day: what is allocated, what remains, and where allocations collide." />
+<ProblemAlert Problem="Problem" OnRetry="LoadDataAsync" />
+<LiveRegion Message="@Announcement" />
+
+<form class="filters" @onsubmit:preventDefault data-testid="res-filters">
+    <div class="field">
+        <label for="r-cemetery">Cemetery</label>
+        <select id="r-cemetery" value="@(_cemeteryId?.ToString() ?? "")" @onchange="CemeteryChanged" data-testid="res-cemetery">
+            @foreach (var c in _cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <label for="r-date">Date (cemetery-local)</label>
+        <input id="r-date" type="date" value="@Date(_date)" @onchange="DateChanged" data-testid="res-date" />
+    </div>
+    <div class="row">
+        <button type="button" class="btn btn--small" @onclick="() => Go(_cemeteryId, _date.AddDays(-1))">‹ Previous day</button>
+        <button type="button" class="btn btn--small" @onclick="() => Go(_cemeteryId, _date.AddDays(1))">Next day ›</button>
+    </div>
+</form>
+
+@if (Loading)
+{
+    <p class="muted" role="status">Loading resources…</p>
+}
+else if (Cemetery is not null)
+{
+    <section class="card card--flush" aria-labelledby="stock-title" data-testid="res-stock">
+        <div class="card__pad">
+            <h2 id="stock-title">Stock at @Cemetery.Name on @_date.ToString("dddd d MMMM yyyy", Ui.Culture)</h2>
+            <p class="muted">"Allocated" is the peak number in use at the same time during the day (reservation blocks include setup and teardown). Times in @Ui.ShortZone(Cemetery.TimeZoneId).</p>
+        </div>
+        @if (_lines.Count == 0)
+        {
+            <EmptyState Title="No active resources at this cemetery"><p>A System Admin adds stock on Administration: Venues.</p></EmptyState>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="table table--cards">
+                    <caption class="visually-hidden">Inventory, peak allocation and remaining stock</caption>
+                    <thead><tr><th scope="col">Resource</th><th scope="col" class="num">In stock</th><th scope="col" class="num">Allocated (peak)</th><th scope="col" class="num">Remaining</th><th scope="col">Use</th><th scope="col">Allocations</th></tr></thead>
+                    <tbody>
+                        @foreach (var line in _lines)
+                        {
+                            var conflict = line.Uses.Any(u => u.Conflict);
+                            <tr data-testid="res-line" data-code="@line.Code" class="@(conflict ? "is-conflict" : null)">
+                                <th scope="row" data-label="Resource">@line.Name <span class="muted">(@line.Unit)</span></th>
+                                <td data-label="In stock" class="num">@line.Total</td>
+                                <td data-label="Allocated" class="num" data-testid="res-allocated">@line.Allocated</td>
+                                <td data-label="Remaining" class="num" data-testid="res-remaining">@Math.Max(0, line.Remaining)</td>
+                                <td data-label="Use">
+                                    <span class="meter" aria-hidden="true"><span class="meter__fill @(conflict ? "is-over" : null)" style="@Width(line)"></span></span>
+                                    @if (conflict)
+                                    {
+                                        <span class="chip chip--bad" data-testid="res-conflict">Over-allocated by @(-line.Remaining)</span>
+                                    }
+                                    else if (line.Allocated == 0)
+                                    {
+                                        <span class="muted">Not in use</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">@(line.Total == 0 ? 0 : line.Allocated * 100 / line.Total)% in use</span>
+                                    }
+                                </td>
+                                <td data-label="Allocations">
+                                    @if (line.Uses.Count == 0)
+                                    {
+                                        <span class="muted">None</span>
+                                    }
+                                    else
+                                    {
+                                        <ul class="uses">
+                                            @foreach (var u in line.Uses)
+                                            {
+                                                <li>
+                                                    <strong>@u.Quantity</strong> · <a href="applications/detail?id=@u.ApplicationId">@u.Reference</a>, @u.VenueName,
+                                                    @Ui.LocalTime(u.BlockStartUtc, Cemetery.TimeZoneId)–@Ui.LocalTime(u.BlockEndUtc, Cemetery.TimeZoneId)
+                                                    @if (u.Conflict) { <span class="chip chip--bad">Conflict: overlapping allocations exceed stock</span> }
+                                                </li>
+                                            }
+                                        </ul>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="card" aria-labelledby="bookings-title" data-testid="res-reservations">
+        <h2 id="bookings-title">Reservations on this day</h2>
+        @if (!CanAllocate && !CanAssign)
+        {
+            <p class="muted" data-testid="read-only">Read only for your role. Scheduling Officers allocate stock; Operations Managers assign attendants.</p>
+        }
+        @if (_conflictRows is not null)
+        {
+            <ConflictPanel Rows="_conflictRows" OnReload="ReloadAfterConflictAsync" OnReapply="ReapplyAsync" />
+        }
+        @if (_reservations.Count == 0)
+        {
+            <EmptyState Title="No reservations at this cemetery on this day">
+                <p>Reserve a slot on <a href="venues/availability">Venue Availability</a>, or pick another day.</p>
+            </EmptyState>
+        }
+        else
+        {
+            <div class="bookings">
+                @foreach (var r in _reservations)
+                {
+                    var form = Form(r.ReservationId);
+                    var active = _active == r.ReservationId;
+                    <article class="booking" aria-labelledby="b-@r.ReservationId" data-testid="res-booking" data-reference="@r.Reference">
+                        <header class="booking__head">
+                            <h3 id="b-@r.ReservationId"><a href="applications/detail?id=@r.ApplicationId">@r.Reference</a> · @r.Title</h3>
+                            <StatusChip Status="r.Status" />
+                        </header>
+                        <p class="muted">@r.VenueName · event @Ui.LocalTime(r.StartUtc, r.TimeZoneId)–@Ui.LocalTime(r.EndUtc, r.TimeZoneId), blocked @Ui.LocalTime(r.BlockStartUtc, r.TimeZoneId)–@Ui.LocalTime(r.BlockEndUtc, r.TimeZoneId) (@Ui.ShortZone(r.TimeZoneId)) · @Ui.Plural(r.AttendeeCount, "attendee", "attendees")</p>
+                        @if (!string.IsNullOrWhiteSpace(r.AttendantNeeds))
+                        {
+                            <p><strong>Attendant needs:</strong> @r.AttendantNeeds</p>
+                        }
+
+                        <h4>Allocated stock</h4>
+                        @if (r.Allocations.Count == 0)
+                        {
+                            <p class="muted">Nothing allocated.</p>
+                        }
+                        else
+                        {
+                            <ul class="alloc-list">
+                                @foreach (var a in r.Allocations)
+                                {
+                                    <li data-testid="res-allocation" data-resource="@a.Name">
+                                        <span>@a.Quantity × @a.Name (@a.Unit)</span>
+                                        @if (CanAllocate && Allocatable(r))
+                                        {
+                                            <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => ReleaseAsync(r, a)" data-testid="res-release">Release</button>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        }
+
+                        @if (CanAllocate && Allocatable(r))
+                        {
+                            <form class="alloc-form" @onsubmit="() => SaveAllocationAsync(r)" @onsubmit:preventDefault novalidate data-testid="res-alloc-form">
+                                <div class="field">
+                                    <label for="res-@r.ReservationId">Resource</label>
+                                    <select id="res-@r.ReservationId" @bind="form.ResourceId" aria-invalid="@(active ? Invalid("resourceId") : null)" aria-describedby="@(active ? Describe("resourceId") : null)" data-testid="res-alloc-resource">
+                                        <option value="">Choose stock</option>
+                                        @foreach (var l in _lines)
+                                        {
+                                            <option value="@l.ResourceId">@l.Name (@Math.Max(0, l.Remaining) of @l.Total free at peak)</option>
+                                        }
+                                    </select>
+                                    @if (active) { <FieldErrors Id="@ErrorId("resourceId")" Messages="@(Errors("resourceId"))" /> }
+                                </div>
+                                <div class="field">
+                                    <label for="qty-@r.ReservationId">Quantity</label>
+                                    <input id="qty-@r.ReservationId" type="number" min="0" inputmode="numeric" @bind="form.Quantity" aria-invalid="@(active ? Invalid("quantity") : null)"
+                                           aria-describedby="@(active ? Describe("quantity", $"qty-hint-{r.ReservationId}") : $"qty-hint-{r.ReservationId}")" data-testid="res-alloc-qty" />
+                                    <span class="field__hint" id="qty-hint-@r.ReservationId">0 releases the allocation.</span>
+                                    @if (active) { <FieldErrors Id="@ErrorId("quantity")" Messages="@(Errors("quantity"))" /> }
+                                </div>
+                                <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="res-alloc-save">Save allocation</button>
+                            </form>
+                        }
+
+                        <h4>Attendants</h4>
+                        @if (r.Attendants.Count == 0)
+                        {
+                            <p class="muted">No attendant assigned.</p>
+                        }
+                        else
+                        {
+                            <ul class="alloc-list">
+                                @foreach (var s in r.Attendants)
+                                {
+                                    <li data-testid="res-attendant">
+                                        <span>@s.DisplayName</span>
+                                        @if (CanAssign && Assignable(r))
+                                        {
+                                            <button type="button" class="btn btn--small" disabled="@Busy" @onclick="() => AssignAsync(r, s.UserId, false)">Remove</button>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        }
+                        @if (CanAssign)
+                        {
+                            @if (Assignable(r))
+                            {
+                                <form class="alloc-form" @onsubmit="() => AssignFromFormAsync(r)" @onsubmit:preventDefault novalidate>
+                                    <div class="field">
+                                        <label for="att-@r.ReservationId">Attendant</label>
+                                        <select id="att-@r.ReservationId" @bind="form.AttendantId" aria-invalid="@(active ? Invalid("userId") : null)" aria-describedby="@(active ? Describe("userId") : null)" data-testid="res-attendant-select">
+                                            <option value="">Choose an attendant</option>
+                                            @foreach (var s in _attendants.Where(s => r.Attendants.All(a => a.UserId != s.UserId)))
+                                            {
+                                                <option value="@s.UserId">@s.DisplayName</option>
+                                            }
+                                        </select>
+                                        @if (active) { <FieldErrors Id="@ErrorId("userId")" Messages="@(Errors("userId"))" /> }
+                                    </div>
+                                    <button type="submit" class="btn" disabled="@Busy" data-testid="res-assign">Assign attendant</button>
+                                </form>
+                            }
+                            else
+                            {
+                                <p class="muted">Attendants are assigned between approval and check-in; this case is @Workflow.Display(r.Status).</p>
+                            }
+                        }
+                    </article>
+                }
+            </div>
+        }
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "cemetery")] public Guid? CemeteryQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "date")] public string? DateQuery { get; set; }
+
+    private sealed class RowForm
+    {
+        public Guid? ResourceId { get; set; }
+        public int? Quantity { get; set; }
+        public string? AttendantId { get; set; }
+    }
+
+    private IReadOnlyList<CemeteryRow> _cemeteries = [];
+    private IReadOnlyList<ResourceLine> _lines = [];
+    private IReadOnlyList<PlannerReservation> _reservations = [];
+    private IReadOnlyList<StaffOption> _attendants = [];
+    private readonly Dictionary<Guid, RowForm> _forms = [];
+    private Guid? _cemeteryId;
+    private DateOnly _date;
+    private Guid? _active;
+    private IReadOnlyList<ConflictPanel.Row>? _conflictRows;
+    private Func<Task>? _retry;
+
+    private CemeteryRow? Cemetery => _cemeteries.FirstOrDefault(c => c.Id == _cemeteryId);
+    private bool CanAllocate => Me?.Can(Cap.ManageReservations) == true;
+    private bool CanAssign => Me?.Can(Cap.AssignAttendants) == true;
+
+    private static bool Allocatable(PlannerReservation r) =>
+        r.Status is CaseStatus.Eligible or CaseStatus.TentativelyReserved or CaseStatus.PendingApproval or CaseStatus.Approved or CaseStatus.Permitted;
+
+    private static bool Assignable(PlannerReservation r) => r.Status is CaseStatus.Approved or CaseStatus.Permitted or CaseStatus.CheckedIn;
+
+    private RowForm Form(Guid reservationId) => _forms.TryGetValue(reservationId, out var f) ? f : _forms[reservationId] = new RowForm();
+
+    protected override Task OnParametersSetAsync() => LoadDataAsync();
+
+    private async Task LoadDataAsync()
+    {
+        Problem = null;
+        await LoadAsync(async me =>
+        {
+            if (_cemeteries.Count == 0) _cemeteries = await Admin.CemeteriesAsync(me);
+            _cemeteryId = CemeteryQuery is { } c && _cemeteries.Any(x => x.Id == c) ? c : _cemeteries.FirstOrDefault()?.Id;
+            if (Cemetery is null) return;
+            _date = ParseDate(DateQuery) ?? LocalDate(Clock.GetUtcNow(), Cemetery.TimeZoneId);
+            await RefreshAsync(me);
+            if (me.Can(Cap.AssignAttendants) && _attendants.Count == 0) _attendants = await Operations.AttendantsAsync(me);
+        });
+    }
+
+    private async Task RefreshAsync(Actor me)
+    {
+        _lines = await Scheduling.ResourcesAsync(me, Cemetery!.Id, _date);
+        _reservations = await Scheduling.PlannerAsync(me, Cemetery.Id, _date);
+    }
+
+    private void Go(Guid? cemetery, DateOnly date) =>
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(new Dictionary<string, object?> { ["cemetery"] = cemetery?.ToString(), ["date"] = Date(date) }), replace: true);
+
+    private void CemeteryChanged(ChangeEventArgs e) => Go(Guid.TryParse(e.Value?.ToString(), out var g) ? g : null, _date);
+
+    private void DateChanged(ChangeEventArgs e)
+    {
+        if (ParseDate(e.Value?.ToString()) is { } d) Go(_cemeteryId, d);
+    }
+
+    private async Task SaveAllocationAsync(PlannerReservation r)
+    {
+        _active = r.ReservationId;
+        _conflictRows = null;
+        var form = Form(r.ReservationId);
+        var errors = new Dictionary<string, string[]>();
+        if (form.ResourceId is null) errors["resourceId"] = ["Choose the stock to allocate."];
+        if (form.Quantity is null) errors["quantity"] = ["Enter a quantity (0 releases the allocation)."];
+        else if (form.Quantity < 0) errors["quantity"] = ["Quantity cannot be negative."];
+        if (errors.Count > 0)
+        {
+            Fail(errors);
+            return;
+        }
+        var name = _lines.FirstOrDefault(l => l.ResourceId == form.ResourceId)?.Name ?? "Stock";
+        await AllocateAsync(r, form.ResourceId!.Value, form.Quantity!.Value, $"{name}: {form.Quantity} allocated to {r.Reference}.");
+    }
+
+    private Task ReleaseAsync(PlannerReservation r, AllocationLine a)
+    {
+        _active = r.ReservationId;
+        _conflictRows = null;
+        return AllocateAsync(r, a.ResourceId, 0, $"{a.Name} released from {r.Reference}.");
+    }
+
+    private async Task AllocateAsync(PlannerReservation r, Guid resourceId, int quantity, string success)
+    {
+        var ok = await RunAsync(me => Scheduling.SetAllocationAsync(me, r.ReservationId, resourceId, quantity, r.Version), success);
+        if (ok)
+        {
+            _forms.Remove(r.ReservationId);
+            await RefreshAsync(await GetActorAsync());
+        }
+        else if (Problem?.StatusCode == 409)
+        {
+            await ShowConflictAsync(r, () => AllocateAsync(Latest(r), resourceId, quantity, success),
+                ("Allocation", r.Allocations.FirstOrDefault(a => a.ResourceId == resourceId)?.Quantity.ToString(Ui.Culture) ?? "0", quantity.ToString(Ui.Culture)));
+        }
+    }
+
+    private async Task AssignFromFormAsync(PlannerReservation r)
+    {
+        _active = r.ReservationId;
+        _conflictRows = null;
+        var form = Form(r.ReservationId);
+        if (string.IsNullOrEmpty(form.AttendantId))
+        {
+            Fail(new Dictionary<string, string[]> { ["userId"] = ["Choose an attendant to assign."] });
+            return;
+        }
+        await AssignAsync(r, form.AttendantId, true);
+    }
+
+    private async Task AssignAsync(PlannerReservation r, string userId, bool assign)
+    {
+        _active = r.ReservationId;
+        var name = _attendants.FirstOrDefault(a => a.UserId == userId)?.DisplayName ?? r.Attendants.FirstOrDefault(a => a.UserId == userId)?.DisplayName ?? "Attendant";
+        var ok = await RunAsync(me => Operations.AssignAttendantAsync(me, r.ApplicationId, r.Version, userId, assign),
+            assign ? $"{name} assigned to {r.Reference}." : $"{name} removed from {r.Reference}.");
+        if (ok)
+        {
+            _forms.Remove(r.ReservationId);
+            await RefreshAsync(await GetActorAsync());
+        }
+        else if (Problem?.StatusCode == 409)
+        {
+            await ShowConflictAsync(r, () => AssignAsync(Latest(r), userId, assign), ("Attendant", r.Attendants.Any(a => a.UserId == userId) ? "Assigned" : "Not assigned", assign ? "Assigned" : "Not assigned"));
+        }
+    }
+
+    private PlannerReservation Latest(PlannerReservation r) => _reservations.FirstOrDefault(x => x.ReservationId == r.ReservationId) ?? r;
+
+    private async Task ShowConflictAsync(PlannerReservation mine, Func<Task> retry, (string Field, string Saved, string Mine) change)
+    {
+        var problem = Problem;
+        await RefreshAsync(await GetActorAsync());
+        Problem = problem;
+        var saved = Latest(mine);
+        _retry = retry;
+        _conflictRows =
+        [
+            new("Case", $"{saved.Reference}: {Workflow.Display(saved.Status)}", $"{mine.Reference}: {Workflow.Display(mine.Status)}"),
+            new("Allocations", string.Join(", ", saved.Allocations.Select(a => $"{a.Quantity} × {a.Name}")), string.Join(", ", mine.Allocations.Select(a => $"{a.Quantity} × {a.Name}"))),
+            new("Attendants", string.Join(", ", saved.Attendants.Select(a => a.DisplayName)), string.Join(", ", mine.Attendants.Select(a => a.DisplayName))),
+            new(change.Field + " (your change)", change.Saved, change.Mine),
+        ];
+    }
+
+    private async Task ReloadAfterConflictAsync()
+    {
+        _conflictRows = null;
+        _retry = null;
+        Problem = null;
+        await RefreshAsync(await GetActorAsync());
+        Announcement = "Reloaded the saved allocations.";
+    }
+
+    private async Task ReapplyAsync()
+    {
+        _conflictRows = null;
+        var retry = _retry;
+        _retry = null;
+        if (retry is not null) await retry();
+    }
+
+    private static string Width(ResourceLine line) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"width:{(line.Total == 0 ? (line.Allocated > 0 ? 100 : 0) : Math.Min(100, line.Allocated * 100.0 / line.Total)):0.#}%");
+}

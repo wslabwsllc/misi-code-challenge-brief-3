@@ -1,0 +1,225 @@
+@page "/reports"
+@attribute [Authorize(Policy = Cap.ViewReports)]
+@rendermode InteractiveServer
+@inherits AppPage
+@using EventPermits.Application.Services
+@inject DashboardService Reporting
+@inject AdminService Admin
+
+<PageTitle>Reports & Exports · Memorial Event Operations</PageTitle>
+<PageHeader Title="Reports & Exports" Lead="Throughput, approval time, venue utilisation and incidents for a date range, calculated from the database. Each chart has a data table and a CSV export." />
+<ProblemAlert Problem="Problem" OnRetry="ApplyAsync" />
+<LiveRegion Message="@Announcement" Visible="false" />
+
+<form class="filters" @onsubmit="ApplyAsync" @onsubmit:preventDefault novalidate data-testid="report-filters">
+    <div class="field">
+        <label for="rep-from">From</label>
+        <input id="rep-from" type="date" @bind="_from" aria-invalid="@Bad("from")" aria-describedby="rep-from-error" data-testid="report-from" />
+        <span id="rep-from-error" class="field__error">@Msg("from")</span>
+    </div>
+    <div class="field">
+        <label for="rep-to">To</label>
+        <input id="rep-to" type="date" @bind="_to" aria-invalid="@Bad("to")" aria-describedby="rep-to-error" data-testid="report-to" />
+        <span id="rep-to-error" class="field__error" data-testid="report-to-error">@Msg("to")</span>
+    </div>
+    <div class="field">
+        <label for="rep-cemetery">Cemetery</label>
+        <select id="rep-cemetery" @bind="_cemetery" data-testid="report-cemetery">
+            <option value="">All cemeteries</option>
+            @foreach (var c in _cemeteries)
+            {
+                <option value="@c.Id">@c.Name</option>
+            }
+        </select>
+    </div>
+    <div class="field">
+        <button type="submit" class="btn btn--primary" disabled="@Busy" data-testid="report-apply">Apply filters</button>
+    </div>
+</form>
+
+@if (Loading && _view is null)
+{
+    <p class="muted" role="status">Calculating reports…</p>
+}
+else if (_view is not null)
+{
+    var f = _view.Filter;
+    <section class="card rep-summary" aria-labelledby="rep-summary-title" data-testid="report-summary">
+        <h2 id="rep-summary-title">Summary for @f.From.ToString("d MMM yyyy", Ui.Culture) to @f.To.ToString("d MMM yyyy", Ui.Culture)@(CemeteryName is { } cn ? $" · {cn}" : "")</h2>
+        <dl class="rep-figures">
+            <div><dt>Applications created</dt><dd data-testid="report-applications">@_view.Applications.ToString("N0", Ui.Culture)</dd></div>
+            <div><dt>Median days to decision</dt><dd data-testid="report-median">@Days(_view.MedianApprovalDays)</dd></div>
+            <div><dt>90th percentile days</dt><dd data-testid="report-p90">@Days(_view.P90ApprovalDays)</dd></div>
+            <div><dt>Incidents reported</dt><dd>@_view.IncidentsBySeverity.Sum(b => b.Value).ToString("N0", Ui.Culture)</dd></div>
+        </dl>
+        @if (Me?.Can(Cap.ExportAudit) == true)
+        {
+            <p class="rep-audit">
+                <a class="btn btn--small" href="@AuditCsvHref" download data-testid="report-audit-csv">Export audit CSV for this range</a>
+                <span class="muted">Reports contain counts only; no applicant contact details appear here.</span>
+            </p>
+        }
+    </section>
+
+    <div class="rep-grid">
+        @Chart(new("throughput", "Applications by current status", ThroughputSummary, _view.ThroughputByStatus, "Status", "Applications", false))
+        @Chart(new("submissions", "Submissions per ISO week", SubmissionSummary, _view.SubmissionsByWeek, "Week", "Submitted", false))
+        @Chart(new("approval-time", "Days from submission to final decision", ApprovalSummary, _view.ApprovalDays, "Duration", "Decisions", false))
+        @Chart(new("utilisation", "Venue utilisation", UtilisationSummary, _view.VenueUtilisation, "Venue", "Booked share of open hours", true))
+        @Chart(new("incidents", "Incidents by severity", IncidentSummary, _view.IncidentsBySeverity, "Severity", "Incidents", false))
+    </div>
+}
+
+@code {
+    private sealed record ChartSpec(string Key, string Title, string Summary, IReadOnlyList<Bar> Bars, string LabelHeader, string ValueHeader, bool Percent);
+
+    [SupplyParameterFromQuery(Name = "from")] public string? FromQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "to")] public string? ToQuery { get; set; }
+    [SupplyParameterFromQuery(Name = "cemeteryId")] public string? CemeteryQuery { get; set; }
+
+    private DateOnly? _from;
+    private DateOnly? _to;
+    private string _cemetery = "";
+    private IReadOnlyList<CemeteryRow> _cemeteries = [];
+    private ReportView? _view;
+    private ReportFilter? _loaded;
+    private Dictionary<string, string> _fieldErrors = [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var today = DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        _from = DateOnly.TryParse(FromQuery, Ui.Culture, out var f) ? f : today.AddDays(-89);
+        _to = DateOnly.TryParse(ToQuery, Ui.Culture, out var t) ? t : today;
+        _cemetery = Guid.TryParse(CemeteryQuery, out var c) ? c.ToString() : "";
+        var filter = new ReportFilter(_from.Value, _to.Value, Cemetery);
+        if (_loaded == filter && _view is not null) return;
+        await LoadAsync(async actor =>
+        {
+            if (_cemeteries.Count == 0) _cemeteries = await Admin.CemeteriesAsync(actor);
+            _view = await Reporting.ReportAsync(actor, filter);
+            _loaded = filter;
+        });
+        CollectFieldErrors();
+    }
+
+    private Guid? Cemetery => Guid.TryParse(_cemetery, out var g) ? g : null;
+
+    private async Task ApplyAsync()
+    {
+        _fieldErrors = [];
+        if (_from is null) _fieldErrors["from"] = "Choose a start date.";
+        if (_to is null) _fieldErrors["to"] = "Choose an end date.";
+        if (_fieldErrors.Count > 0)
+        {
+            Problem = null;
+            await Js.InvokeVoidAsync("eventPermits.focusFirstInvalid");
+            return;
+        }
+        var filter = new ReportFilter(_from!.Value, _to!.Value, Cemetery);
+        var ok = await RunAsync(async actor =>
+        {
+            _view = await Reporting.ReportAsync(actor, filter);
+            _loaded = filter;
+        }, "Reports updated for the chosen range.");
+        CollectFieldErrors();
+        if (ok)
+            Nav.NavigateTo($"/reports?{Query(filter)}", replace: true);
+    }
+
+    private void CollectFieldErrors()
+    {
+        if (Problem is null) return;
+        foreach (var (field, messages) in Problem.Errors) _fieldErrors[field] = string.Join(" ", messages);
+    }
+
+    private string? Bad(string field) => _fieldErrors.ContainsKey(field) ? "true" : null;
+    private string? Msg(string field) => _fieldErrors.TryGetValue(field, out var m) ? m : null;
+
+    private static string Query(ReportFilter f) =>
+        $"from={f.From:yyyy-MM-dd}&to={f.To:yyyy-MM-dd}" + (f.CemeteryId is { } c ? $"&cemeteryId={c}" : "");
+
+    private string CsvHref(string report) => _view is null ? "#" : $"/api/reports/{report}.csv?{Query(_view.Filter)}";
+    private string AuditCsvHref => _view is null ? "#" : $"/api/audit/export.csv?from={_view.Filter.From:yyyy-MM-dd}&to={_view.Filter.To:yyyy-MM-dd}";
+
+    private string? CemeteryName => _view?.Filter.CemeteryId is { } id ? _cemeteries.FirstOrDefault(c => c.Id == id)?.Name : null;
+
+    private static string Days(double? d) => d is null ? "No decisions" : $"{d.Value.ToString("0.0", Ui.Culture)} days";
+
+    private string ThroughputSummary => _view is null ? "" : _view.Applications == 0
+        ? "No applications were created in this range."
+        : $"{_view.Applications:N0} applications created in the range. Largest group: {Top(_view.ThroughputByStatus)}.";
+
+    private string SubmissionSummary => _view is null ? "" : _view.SubmissionsByWeek.Count == 0
+        ? "No applications were submitted in this range."
+        : $"{_view.SubmissionsByWeek.Sum(b => b.Value):N0} submissions over {_view.SubmissionsByWeek.Count} week(s); busiest {Top(_view.SubmissionsByWeek)}.";
+
+    private string ApprovalSummary => _view is null ? "" : _view.MedianApprovalDays is null
+        ? "No final decisions were recorded for applications created in this range."
+        : $"Median {Days(_view.MedianApprovalDays)}, 90th percentile {Days(_view.P90ApprovalDays)}, over {_view.ApprovalDays.Sum(b => b.Value):N0} decision(s).";
+
+    private string UtilisationSummary => _view is null ? "" : _view.VenueUtilisation.Count == 0
+        ? "No venues match the filter."
+        : $"Average {_view.VenueUtilisation.Average(b => b.Value).ToString("0.0", Ui.Culture)}% across {_view.VenueUtilisation.Count} venue(s); highest {Top(_view.VenueUtilisation)}.";
+
+    private string IncidentSummary => _view is null ? "" : _view.IncidentsBySeverity.Sum(b => b.Value) == 0
+        ? "No incidents were reported in this range."
+        : $"{_view.IncidentsBySeverity.Sum(b => b.Value):N0} incident(s); most common severity {Top(_view.IncidentsBySeverity)}.";
+
+    private static string Top(IReadOnlyList<Bar> bars) => bars.Count == 0 ? "none" : bars.MaxBy(b => b.Value) is { } b ? $"{b.Label} ({b.Display})" : "none";
+
+    private static double Width(Bar bar, IReadOnlyList<Bar> bars, bool percent)
+    {
+        var max = percent ? 100 : bars.Count == 0 ? 0 : bars.Max(b => b.Value);
+        return max <= 0 ? 0 : Math.Round(100 * bar.Value / max, 1);
+    }
+
+    private RenderFragment Chart(ChartSpec c) =>
+        @<section class="card rep-chart" aria-labelledby="@($"chart-{c.Key}-title")" data-testid="@($"chart-{c.Key}")">
+            <div class="rep-chart__head">
+                <h2 id="@($"chart-{c.Key}-title")">@c.Title</h2>
+                <a class="btn btn--small" href="@CsvHref(c.Key)" download data-testid="@($"csv-{c.Key}")">CSV<span class="visually-hidden"> export of @c.Title</span></a>
+            </div>
+            <p class="rep-chart__summary" data-testid="@($"chart-{c.Key}-summary")">@c.Summary</p>
+            @if (c.Bars.Count == 0)
+            {
+                <EmptyState Title="No data for this range" />
+            }
+            else
+            {
+                <ul class="bar-chart rep-bars" role="list" aria-label="@($"{c.Title}: bar chart")">
+                    @foreach (var b in c.Bars)
+                    {
+                        <li class="bar">
+                            <span class="rep-bar__label">
+                                @if (b.Href is not null)
+                                {
+                                    <a href="@b.Href" data-testid="@($"drill-{c.Key}")">@b.Label</a>
+                                }
+                                else
+                                {
+                                    @b.Label
+                                }
+                            </span>
+                            <span class="bar__track" aria-hidden="true"><span class="bar__fill rep-bar__fill" style="width: @(Width(b, c.Bars, c.Percent).ToString(System.Globalization.CultureInfo.InvariantCulture))%"></span></span>
+                            <span class="rep-bar__value">@b.Display</span>
+                        </li>
+                    }
+                </ul>
+                <details class="rep-table">
+                    <summary>Data table</summary>
+                    <div class="table-wrap">
+                        <table class="table table--compact" data-testid="@($"table-{c.Key}")">
+                            <caption class="visually-hidden">@c.Title: data</caption>
+                            <thead><tr><th scope="col">@c.LabelHeader</th><th scope="col" class="num">@c.ValueHeader</th></tr></thead>
+                            <tbody>
+                                @foreach (var b in c.Bars)
+                                {
+                                    <tr><th scope="row">@b.Label</th><td class="num">@b.Display</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
+            }
+        </section>;
+}

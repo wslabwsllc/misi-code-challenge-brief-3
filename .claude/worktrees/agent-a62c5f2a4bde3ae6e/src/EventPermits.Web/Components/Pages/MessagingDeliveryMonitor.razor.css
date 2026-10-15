@@ -1,0 +1,12 @@
+.monitor-kpis { margin-bottom: var(--space-4); }
+.wrap { overflow-wrap: anywhere; word-break: break-word; }
+section + section { margin-top: var(--space-5); }
+@media (max-width: 720px) {
+  /* Cards: keep multi-line cell content together beside its label. */
+  .table--cards td { display: block; position: relative; padding-left: calc(9.5em + var(--space-5)); min-height: 1.6em; overflow-wrap: anywhere; }
+  .table--cards td::before { position: absolute; left: var(--space-4); width: 9.5em; }
+  .table--cards caption { display: block; }
+}
+@media (max-width: 720px) {
+  .monitor-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+}

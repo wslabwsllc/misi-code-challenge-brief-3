@@ -1,0 +1,17 @@
+.review { margin-bottom: var(--space-5); border-top: 3px solid var(--brand); }
+.review h2 { margin-top: 0; }
+
+.doc-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.doc-list li { display: grid; gap: var(--space-1); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); overflow-wrap: anywhere; }
+
+.evidence { padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.evidence h3 { margin-top: 0; }
+.evidence details { margin-top: var(--space-3); font-size: .9rem; }
+.evidence summary { cursor: pointer; min-height: 32px; }
+
+.decision { padding: var(--space-4); border: 1px solid var(--line-strong); border-radius: var(--radius); }
+.decision h3 { margin-top: 0; }
+
+.is-selected { background: var(--brand-tint); }
+
+dd, code { overflow-wrap: anywhere; }

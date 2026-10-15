@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Testcontainers" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="AWSSDK.S3" />
+    <ProjectReference Include="..\..\src\EventPermits.Web\EventPermits.Web.csproj" />
+    <ProjectReference Include="..\..\src\EventPermits.Mocks\EventPermits.Mocks.csproj" />
+  </ItemGroup>
+</Project>

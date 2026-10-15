@@ -1,0 +1,24 @@
+.card__pad { padding: var(--space-5) var(--space-5) var(--space-3); }
+.card__pad h2 { margin-top: 0; }
+
+.meter { display: block; width: 100%; max-width: 160px; height: 10px; background: var(--neutral-tint); border-radius: 999px; overflow: hidden; margin-bottom: var(--space-1); }
+.meter__fill { display: block; height: 100%; background: var(--brand); }
+.meter__fill.is-over { background: var(--danger); }
+tr.is-conflict th { box-shadow: inset 3px 0 0 var(--danger); }
+
+.uses { list-style: none; margin: 0; padding: 0; font-size: .88rem; }
+.uses li + li { margin-top: var(--space-1); }
+
+.bookings { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); }
+.booking { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-4); background: var(--surface-2); }
+.booking__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.booking__head h3 { margin: 0; font-size: 1.02rem; }
+.booking h4 { margin: var(--space-3) 0 var(--space-2); font-size: .92rem; }
+.alloc-list { list-style: none; margin: 0 0 var(--space-2); padding: 0; display: grid; gap: var(--space-2); }
+.alloc-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.alloc-form { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; margin-top: var(--space-2); }
+.alloc-form:has(> .field:only-of-type) { grid-template-columns: minmax(0, 1fr) auto; }
+
+@media (max-width: 720px) {
+  .alloc-form, .alloc-form:has(> .field:only-of-type) { grid-template-columns: 1fr; }
+}

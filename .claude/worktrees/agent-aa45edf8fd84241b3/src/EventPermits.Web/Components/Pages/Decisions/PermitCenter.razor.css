@@ -1,0 +1,9 @@
+.panel { margin-bottom: var(--space-5); border-top: 3px solid var(--brand); }
+.panel h2 { margin-top: 0; overflow-wrap: anywhere; }
+
+textarea.tall { min-height: 160px; }
+
+.permit-action { margin-top: var(--space-4); padding: var(--space-4); border: 1px solid var(--line-strong); border-radius: var(--radius); }
+.permit-action h3 { margin-top: 0; }
+
+.is-selected { background: var(--brand-tint); }
