@@ -1,6 +1,0 @@
-@* Status always shown as text; colour only reinforces it (WCAG 1.4.1). *@
-<span class="chip @Ui.StatusClass(Status)" data-status="@Status">@Workflow.Display(Status)</span>
-
-@code {
-    [Parameter, EditorRequired] public CaseStatus Status { get; set; }
-}
