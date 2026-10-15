@@ -4,11 +4,11 @@ Copy everything below the line into the AI coding agent, with this repository op
 
 ---
 
-You are the lead engineer for the fictional **Memorial Event Operations & Permit Case Management** application (VA MISI practice brief 3). Build the complete working application in .NET 10 (the user's decision), with source, migrations, seed data, six mock external services, tests, tooling, documentation, Terraform and Azure DevOps pipelines, and deploy it to AWS dev. A scaffold, a design proposal or a dashboard of static cards fails the brief. Continue through verification.
+You are the lead engineer for the fictional **Memorial Event Operations & Permit Case Management** application (VA MISI practice brief 3). Build the complete working application in .NET 10 (the user's decision), with source, migrations, seed data, six mock external services, tests, tooling, documentation, Terraform and GitHub Actions workflows, and deploy it to AWS dev and the protected AWS prod environment. A scaffold, a design proposal or a dashboard of static cards fails the brief. Continue through verification.
 
 ## 1. Read first (every session, and again after a context reset)
 
-1. `CLAUDE.md`: stable rules, source hierarchy, AWS/Azure DevOps boundaries, action boundaries.
+1. `CLAUDE.md`: stable rules, source hierarchy, AWS/GitHub boundaries, action boundaries.
 2. `docs/plan/STATUS.md`: your progress record. If it does not exist, you are at E0-01.
 3. `docs/VA_MISI_Technical_Challenge_3 1.pdf`: the brief. Read all six pages on first entry. After a reset, re-read the sections the next story cites. If extraction is truncated, retrieve the missing part before relying on it.
 4. `docs/plan/IMPLEMENTATION-PLAN.md`: **your specification.** It covers architecture, decisions OD-1…OD-6, assumptions A-01…A-28, milestones M0–M4, epics E0–E16 with stories and acceptance criteria, Definition of Done, seed counts, traceability and the submission checklist.
@@ -30,7 +30,7 @@ While waiting for a human step, continue with independent stories and say which 
 
 Stop and ask the user only when:
 - a decision is genuinely the user's and blocks the current story (put the question and your recommended default in STATUS.md, then continue other work);
-- a story needs a [HUMAN] step: name the exact step in `docs/aws/AZURE-DEVOPS-SETUP-GUIDE.md` and what you need back;
+- a story needs a [HUMAN] step: name the exact step in `docs/aws/GITHUB-ACTIONS-SETUP-GUIDE.md` and what you need back;
 - an official source contradicts the plan (for example a version is unavailable, or the MinIO image is no longer published). Quote the source and propose the smallest change.
 
 ## 3. Non-negotiable rules
@@ -57,16 +57,16 @@ Stop and ask the user only when:
 - Naming and isolation exactly as CLAUDE.md states (prefix `misi3`). Read challenge-2 resources and the shared OIDC provider only through data sources; never change them.
 - Everything Terraform creates, Terraform can destroy in one run. Hand-made resources (state bucket, two ECR repositories) are only read. For every Terraform story, record in STATUS.md how its resources are destroyed.
 - Never publish plan files as pipeline artifacts. Pipeline inputs come only from `TF_VAR_*`, never from tfvars.
-- Host names follow plan section 4.6: with no `base_domain` the app is HTTP on the ALB DNS name; with one it is served only at `https://dev-brief3.<base_domain>`. Derive it in Terraform; never hard-code a host, and never create records challenge 2 could use (for example `dev.<base_domain>`).
+- Host names follow plan section 4.6: with no `base_domain` the app is HTTP on the ALB DNS name; with one it is served only at `https://${environment}-brief3.<base_domain>`. Derive it in Terraform; provision ACM DNS validation, Route 53 records when selected, an HTTPS listener with an explicit certificate-validation dependency, and an HTTP redirect. Never hard-code a host or create records challenge 2 could use.
 
-**Azure DevOps**
-- YAML only, in `pipelines/`, using `pipelines/templates/`. Pin the agent image and every downloaded tool with checksums. Plan and PR jobs use `aws-misi3-plan`; only the deployment job uses `aws-misi3-deploy`, and only from `main`.
+**GitHub Actions**
+- Workflows live in `.github/workflows/` and reusable logic in `.github/actions/`. Pin every third-party action to a full commit SHA and every downloaded tool by checksum. Use OIDC only: plan jobs use `misi3-gha-plan`; deploy and destroy use `misi3-gha-deploy` only from protected environments and allowed branches.
 
 ## 4. What you may run without asking, and what needs approval
 
 Without asking: reading files; `dotnet` build/test/run; `docker` and `docker compose` against local stacks; `tools/Dev` commands; `terraform fmt/validate/init -backend=false`; `tflint`; `trivy`; `gitleaks`; `shellcheck`; documentation lookups.
 
-Ask **at that moment**, as CLAUDE.md requires: any AWS-credentialed command (`terraform plan/apply` against real state, `aws ...`); pushing to Azure Repos; creating PRs; running pipelines; and anything destructive. If the user approved a kind of non-destructive action earlier in this session, you may repeat that same kind.
+Ask **at that moment**, as CLAUDE.md requires: any AWS-credentialed command (`terraform plan/apply` against real state, `aws ...`); pushing to GitHub; creating PRs; dispatching or re-running workflows; and anything destructive. If the user approved a kind of non-destructive action earlier in this session, you may repeat that same kind.
 
 ## 5. Evidence rules
 
