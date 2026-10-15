@@ -1,6 +1,6 @@
 # Infrastructure Setup: plan (boundary `infra`)
 
-Owner: one infrastructure/DevOps engineer. Read [`../README.md`](../README.md) first (ownership, contracts, requests protocol). Story acceptance criteria (AC) live in the master [`../IMPLEMENTATION-PLAN.md`](../IMPLEMENTATION-PLAN.md); this file lists what you own, what changed for **GitHub Actions**, and the order to work in. Progress goes in `docs/plan/infra/STATUS.md` (create it in E14-00).
+Owner: one infrastructure engineer. Read [`../README.md`](../README.md) first (ownership, contracts, requests protocol). Story acceptance criteria (AC) live in the master [`../IMPLEMENTATION-PLAN.md`](../IMPLEMENTATION-PLAN.md); this file lists what you own, what changed for **GitHub Actions**, and the order to work in. Progress goes in `docs/plan/infra/STATUS.md` (create it in E14-00).
 
 ## 1. Mission and scope
 
@@ -34,7 +34,7 @@ Carried from the archived deploy plan (old `D-n` = new `I-0n`), with the GitHub 
 | ID | Decision |
 | --- | --- |
 | OD-3 | No `base_domain`: HTTP on the ALB DNS name. With one: ACM DNS validation, HTTPS listener and HTTP redirect at `${environment}-brief3.<base_domain>`, derived in Terraform (`-brief3` is a fixed local) |
-| OD-4 (changed) | Isolation from challenge 2: new state bucket `misi-event-permits-tf-state`, ECR `misi/event-permits-web` and `misi/event-permits-mocks`, **roles `misi3-gha-plan` / `misi3-gha-deploy` under path `/gha/`**, **protected GitHub environments `aws-misi3-dev` and `aws-misi3-prod`**, prefix `misi3-<env>-`, secrets `misi3/<env>/*`, IAM path `/misi3/`, separate VPC CIDRs per environment. Challenge-2 OIDC provider and `misi-ado-*` roles are never touched |
+| OD-4 (changed) | Isolation from challenge 2: new state bucket `misi-event-permits-tf-state`, ECR `misi/event-permits-web` and `misi/event-permits-mocks`, **roles `misi3-gha-plan` / `misi3-gha-deploy` under path `/gha/`**, **protected GitHub environments `aws-misi3-dev` and `aws-misi3-prod`**, prefix `misi3-<env>-`, secrets `misi3/<env>/*`, IAM path `/misi3/`, separate VPC CIDRs per environment. Challenge-2 OIDC provider and legacy `misi-ado-*` roles are never touched |
 | I-01 | ECS Fargate, `X86_64`, images built `--platform linux/amd64` |
 | I-02 | RDS PostgreSQL 18 (latest 18.x in region), `db.t4g.micro`, `rds.force_ssl=1`, client `VerifyFull`. If 18 is unavailable: stop and ask |
 | I-03 | S3 for attachments, permits, `partner-drop/`; Data Protection keys in PostgreSQL; no EFS |
