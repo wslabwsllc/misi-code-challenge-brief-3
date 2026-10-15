@@ -2,7 +2,7 @@
 
 Status: **proposed plan, nothing implemented.** Written 2026-10-15. The implementing agent records progress in `docs/plan/STATUS.md`, never in this file. Changes to this plan are made deliberately (by the user, or by the agent after the user agrees) and noted in the change log at the end.
 
-This plan builds the application described in `docs/VA_MISI_Technical_Challenge_3 1.pdf` (the **brief**) in .NET, and deploys it to AWS with Terraform and Azure DevOps Pipelines. It is organised as **epics → user stories → acceptance criteria**, ordered into **milestones** so that a working, deployed system exists from the first milestone and grows from there.
+This plan builds the application described in `docs/VA_MISI_Technical_Challenge_3 1.pdf` (the **brief**) in .NET, and deploys it to AWS with Terraform and GitHub Actions. It is organised as **epics → user stories → acceptance criteria**, ordered into **milestones** so that a working, deployed system exists from the first milestone and grows from there.
 
 | File | Audience | Purpose |
 | --- | --- | --- |
@@ -10,8 +10,8 @@ This plan builds the application described in `docs/VA_MISI_Technical_Challenge_
 | `docs/plan/IMPLEMENTATION-PLAN.md` (this file) | Agent and humans | Scope, architecture, decisions, assumptions, epics and stories |
 | `docs/plan/AI-IMPLEMENTATION-PROMPT.md` | Agent | The prompt that starts or resumes the work |
 | `docs/plan/STATUS.md` | Agent and humans | Created by the agent in E0-01; the live progress record |
-| `docs/plan/app-only/*`, `docs/plan/deploy-infra-only/*` | Agents | The same work split into an app track and a deploy track (see `CLAUDE.md` "Tracks"); use either the combined track or the split tracks, never both |
-| `docs/aws/AZURE-DEVOPS-SETUP-GUIDE.md` | Human | Created by the agent in E15-01; click-by-click steps only a person can do |
+| `docs/plan/{db,ext-svc,infra,test-auto,ui-ux}/*` | Agents | Boundary-specific plans and prompts; use one boundary per session |
+| `docs/aws/GITHUB-ACTIONS-SETUP-GUIDE.md` | Human | Created by the agent in E15-01; click-by-click steps only a person can do |
 
 ---
 
@@ -30,7 +30,7 @@ The challenge-2 repository (`misi-code-challenge-wed`, same Azure DevOps project
 | Screenshots, ERD and API spec produced by hand | Generated: Playwright screenshots of all 26 pages, OpenAPI export, Mermaid ERD and state diagram kept next to code |
 | Requirements spread over prompt, plan and CLAUDE.md | Each brief rule maps to a story ID (section 10 traceability index) |
 
-Reuse from challenge 2 (copy, then adapt; never reference it at runtime): `infra/modules/*`, `infra/scripts/run-one-off-task.sh`, `infra/scripts/check-guards.sh`, `infra/scripts/smoke-http*.sh`, `pipelines/templates/*`, the `tools/Dev` runner pattern, the `probe` health command pattern, and the Azure DevOps setup guide structure. Re-verify every version and every argument; challenge-2 Terraform was validated but **never applied**.
+Reuse from challenge 2 (copy, then adapt; never reference it at runtime): `infra/modules/*`, `infra/scripts/run-one-off-task.sh`, `infra/scripts/check-guards.sh`, `infra/scripts/smoke-http*.sh`, the `tools/Dev` runner pattern and the `probe` health command pattern. Re-verify every version and every argument; challenge-2 Terraform was validated but **never applied**. Write all workflows for GitHub Actions from scratch.
 
 ---
 
@@ -40,8 +40,8 @@ Reuse from challenge 2 (copy, then adapt; never reference it at runtime): `infra
 | --- | --- | --- | --- |
 | OD-1 | .NET version | **.NET 10 LTS — decided by the user 2026-10-15** (brief prefers .NET 8) | .NET 8 support ends 2026-11-10, weeks from now; .NET 10 is supported to 2028-11-14. Same choice as challenge 2. The brief allows a different stack if documented |
 | OD-2 | Demo credentials | **Fixed local demo password — decided by the user 2026-10-15.** Every seeded account uses the same documented password `EventPermits!Demo2026` on **local runs only**. The README lists each demo user name, its role(s) and this password (brief FR-01: "seeded demo credentials in README only"); the landing and login pages never show it. The seeder accepts it only when `Seed:AllowDemoPassword=true`, which only `compose.yml` and the local test stack set. Any other environment (AWS) must supply per-user passwords through `Seed:CredentialsJson` and refuses the demo password | Simplest for evaluators. It is a deliberate, documented exception to "no secrets in Git": the accounts are fictional, local and loopback-only, and Gitleaks allowlists this one value with the reason |
-| OD-3 | Public access in AWS | **HTTP on the ALB DNS name** when no domain is given, as in challenge 2. HTTPS mode is fully implemented and switched on by setting `base_domain`; the app is then served **only** at `https://dev-brief3.<base_domain>` (host name rule decided by the user 2026-10-15, see section 4.6) | No domain is available today. The brief says "HTTPS where configured". All data is fictional. The `-brief3` host label keeps this app apart from challenge 2 under the same domain |
-| OD-4 | Isolation from challenge 2 in the shared AWS account and Azure DevOps project | **Reuse only the Azure DevOps OIDC provider**; everything else is new: state bucket `misi-event-permits-tf-state`, roles `misi3-ado-plan` / `misi3-ado-deploy`, service connections `aws-misi3-plan` / `aws-misi3-deploy`, resource prefix `misi3-dev-`, secrets under `misi3/dev/`, VPC `10.41.0.0/16` | One OIDC provider per issuer URL per account (already exists). Separate state bucket keeps challenge-2 roles (which can read `misi/*` and their own state keys) away from this stack's state, which holds secrets |
+| OD-3 | Public access in AWS | **HTTP on the ALB DNS name** while `base_domain` is empty. When a domain is supplied, Terraform provisions ACM DNS validation, Route 53 records when selected, an HTTPS listener using `ELBSecurityPolicy-TLS13-1-2-2021-06`, and HTTP-to-HTTPS redirect; the app is then served only at `https://${environment}-brief3.<base_domain>` | No domain is available today. Current dev and prod deployments therefore use ALB DNS over HTTP. HTTPS remains an implemented, opt-in path rather than a fabricated certificate or domain |
+| OD-4 | Isolation from challenge 2 in the shared AWS account | **Use GitHub Actions OIDC only**; everything else is new: state bucket `misi-event-permits-tf-state`, roles `misi3-gha-plan` / `misi3-gha-deploy`, protected GitHub environments, resource prefix `misi3-`, secrets under `misi3/<environment>/`, VPC `10.41.0.0/16` per environment | Separate state and IAM boundaries keep challenge-2 resources and credentials away from this stack |
 | OD-5 | "Batch CSV / SFTP" pattern | **Drop-folder simulation in object storage** (`partner-drop/` prefix in MinIO locally, S3 in AWS), fed by the Partner Feed mock and documented as an SFTP simulation. A real SFTP adapter (Compose SFTP container + SSH.NET) is a stretch story (E10-04) | The brief explicitly allows "an equivalent local mock drop directory". Avoids AWS Transfer Family (~USD 220/month) or an NLB for port 22 |
 | OD-6 | UI technology | **Blazor Web App, Interactive Server** (Identity pages static SSR), like challenge 2 | Team already knows it; the brief lists Blazor. Needs ALB sticky sessions (solved in challenge 2) |
 
@@ -145,7 +145,8 @@ tests/
   EventPermits.BrowserTests/      Playwright + axe: every page, role journeys, failure-matrix UI, screenshots
 tools/Dev/                        cross-platform runner: doctor, setup, up, down, seed, test, smoke, scan, screenshots
 infra/                            Terraform (manual/, bootstrap/, modules/, envs/dev/, scripts/)
-pipelines/                        Azure DevOps YAML (pr-validation, deploy, destroy, templates/)
+.github/workflows/ GitHub Actions (pr-validation, deploy, destroy)
+.github/actions/ reusable setup and tool actions
 docs/                             brief, plan, architecture, ERD, workflow, API spec, test report, screenshots, logs
 Dockerfile                        web image (web, worker, migrate/seed, probe)
 src/EventPermits.Mocks/Dockerfile mocks image
@@ -162,13 +163,13 @@ Rules: one server-side application service path for UI and HTTP endpoints; no ge
 | Background jobs (outbox sender, calendar sync, CSV import schedule, overdue marker, status poller) | `worker` (same image, command `worker`) | ECS service `worker` ×1 |
 | Migrations + seed | one-shot `migrate` service | one-off Fargate task run by Terraform before every web rollout |
 | Database | `db` PostgreSQL 18 | RDS PostgreSQL 18, `rds.force_ssl=1`, client `SSL Mode=VerifyFull` with the RDS CA bundle baked into the image (A-15) |
-| Object storage (attachments, permits, partner drop) | `minio` + `minio-init` (bucket, policy) | S3 bucket `misi3-dev-files-<suffix>`, private, SSE-S3, TLS-only, Terraform-owned (`force_destroy`) |
+| Object storage (attachments, permits, partner drop) | `minio` + `minio-init` (bucket, policy) | S3 bucket `misi3-<environment>-files-<suffix>`, private, SSE-S3, TLS-only, Terraform-owned (`force_destroy`) |
 | Data Protection keys | PostgreSQL table (EF) | same (no EFS) |
 | Six mock services | `mock-registry`, `mock-calendar`, `mock-notify`, `mock-weather`, `mock-geocode`, `mock-partner-feed` | six ECS services (desired 1, `FARGATE_SPOT` by variable) reached through Service Connect |
 | Webhook callbacks | `mock-notify` → `http://web:8080/webhooks/delivery` | same name through Service Connect (`web` is client-server) |
-| Secrets | generated by `init-local` into ignored `.data/secrets` | generated by Terraform into Secrets Manager `misi3/dev/*`, injected as env vars |
-| Logs | JSON to stdout, `docker compose logs` | CloudWatch log groups `/misi3/dev/<service>` (Terraform-owned) |
-| TLS | HTTP on loopback (A-25) | HTTP on ALB DNS name (OD-3) or HTTPS with ACM at `dev-brief3.<base_domain>` when `base_domain` is set (section 4.6) |
+| Secrets | generated by `init-local` into ignored `.data/secrets` | generated by Terraform into Secrets Manager `misi3/<environment>/*`, injected as env vars |
+| Logs | JSON to stdout, `docker compose logs` | CloudWatch log groups `/misi3/<environment>/<service>` (Terraform-owned) |
+| TLS | HTTP on loopback (A-25) | HTTP on ALB DNS name while `base_domain` is empty; otherwise ACM-validated HTTPS at `${environment}-brief3.<base_domain>` with HTTP redirect (section 4.6) |
 
 The application never knows which column it runs in except through configuration (`Storage:*`, `Database:*`, `Hosting:BehindTlsProxy`, `Integrations:*`). Same images run in both.
 
@@ -226,9 +227,9 @@ The notification mock calls back the app at the URL in `Mock__Notify__WebhookUrl
 | --- | --- | --- |
 | Local | `http://127.0.0.1:5280` | n/a |
 | AWS dev | `http://<alb-dns-name>` (changes on rebuild) | `https://dev-brief3.example.com` only; `http://` redirects (301); the ALB DNS name and any other host return 404 |
-| Future AWS prod (not built) | not allowed (validation rule) | `https://prod-brief3.<base_domain>` or an explicit override |
+| AWS prod | `http://<alb-dns-name>` (changes on rebuild) | `https://prod-brief3.example.com` only; `http://` redirects (301); the ALB DNS name and any other host return 404 |
 
-Terraform derives the host name; nobody types it: `app_host = "${var.environment}-brief3.${var.base_domain}"` (the `-brief3` label is a fixed local in Terraform, not a variable, so it cannot drift). The ACM certificate, the ALB host-header rule, the Route 53 alias (Route 53 modes) or the CNAME the human adds (external DNS mode), the smoke scripts and the `app_url` output all use `app_host`. Challenge 2 used a bare `<APP_DOMAIN>`; never reuse its record names. `base_domain` must be a valid lower-case DNS name without a scheme, trailing dot or leading `dev-` label (Terraform validation).
+Terraform derives the host name only when `base_domain` is non-empty: `app_host = "${var.environment}-brief3.${var.base_domain}"`. The ACM certificate, ALB host-header rule, Route 53 alias (when selected), external-DNS CNAME output, smoke scripts and `app_url` output all use `app_host`. With no domain, no ACM certificate, Route 53 record or HTTPS listener is created and `app_url` is the ALB DNS URL. `route53_zone_id` is required only for Route 53 DNS validation. `base_domain` must be a valid lower-case DNS name without a scheme, trailing dot or leading environment label.
 
 ---
 
@@ -262,7 +263,7 @@ Columns: ID, assumption, reason, impact if wrong, verification/mitigation, decis
 | A-22 | Event Attendant sees only events assigned to them on the roster, with name and on-site contact only |
 | A-23 | Saved views on the register are per user (name + query string), not shared |
 | A-24 | Event date "future at submission" is evaluated in venue local time against the current instant |
-| A-25 | Local and Compose runs serve plain HTTP on 127.0.0.1 only (no generated certificate); internal service-to-service traffic is HTTP inside the Compose network or VPC. HTTPS applies in AWS when `base_domain` is set ("HTTPS where configured", brief §7.4) |
+| A-25 | Local and Compose runs serve plain HTTP on 127.0.0.1 only (no generated certificate); internal service-to-service traffic is HTTP inside the Compose network or VPC. AWS uses HTTP until a domain is supplied, then HTTPS applies through ACM ("HTTPS where configured", brief §7.4) |
 | A-26 | Case edit and upload rights after creation: the Intake Coordinator edits applicant/event/facility sections and uploads documents on own cases only in Draft and Needs Information; the Reviewer adds review notes but does not edit applicant data; the Scheduling Officer edits reservation/resources only in Eligible and Tentatively Reserved; Attendants upload incident photos only; nobody edits a case after Closed, Rejected or Cancelled except append-only comments by staff with access |
 | A-27 | External calendar push: a tentative hold is pushed (`POST /reservations`) when T6 creates or changes a reservation. A 409 opens a ReconciliationItem; T8 requires the push to have succeeded **and** a successful sync covering the slot after the push |
 | A-28 | Data Protection keys are stored in PostgreSQL without an extra key-encryption certificate; protection relies on RDS/volume encryption and database access control (practice-scope limitation, listed in KNOWN-LIMITATIONS) |
@@ -314,7 +315,7 @@ As the team, we want a clean repository with governance documents, so that every
 - AC1 `.gitignore`, `.gitattributes`, `.editorconfig`, `Directory.Build.props` (nullable, warnings as errors, analyzers), `Directory.Packages.props` (central package management), `global.json` exist.
 - AC2 `docs/plan/STATUS.md` lists every story in this plan with state `not started`, plus sections: Objective, Inputs, Verified results, Not executed/blocked, Decisions, Running services, Next action.
 - AC3 `docs/ASSUMPTIONS-LOG.md` (A-01…A-28), `docs/TECHNICAL-DECISIONS.md` (OD-1…OD-6 with alternatives), `docs/REQUIREMENTS-TRACEABILITY.md` skeleton (rows from section 10), `docs/IMPLEMENTATION-LOG.md` exist.
-- AC4 First commit on `main` pushed to Azure Repos `misi-code-challenge-brief-3` (ask before pushing).
+- AC4 Repository is hosted at GitHub `wslabwsllc/misi-code-challenge-brief-3`; changes land through pull requests and protected `main` (ask before pushing or changing repository settings).
 
 #### E0-02 Toolchain verification and pinning · M0
 As the team, we want exact, verified versions, so that builds are repeatable on a clean machine.
@@ -734,14 +735,14 @@ Rules for every Terraform story (carried from challenge 2): exact pins and commi
 - AC1 Agent writes `infra/manual/README.md` with CLI commands and a verification block for: S3 state bucket `misi-event-permits-tf-state` (versioning, SSE-S3, Block Public Access, bucket-owner-enforced, TLS-only policy, non-current versions expire after 90 days) and ECR repositories `misi/event-permits-web`, `misi/event-permits-mocks` (immutable tags, scan on push, AES-256, lifecycle: keep last 30 tagged, expire untagged after 7 days).
 - AC2 Human runs them and returns the verification output; Terraform only reads these (data sources/backend config). A PR guard fails on `resource "aws_ecr_repository"` or a resource for the state bucket.
 
-#### E14-02 Bootstrap: pipeline roles (reusing the OIDC provider) · M0
-- AC1 `infra/bootstrap` adapted from challenge 2: reads the **existing** Azure DevOps OIDC provider (`vstoken.dev.azure.com/<org GUID>`) by data source, never creates or destroys it; creates `misi3-ado-plan` and `misi3-ado-deploy` under path `/ado/` with trust `sub = sc://WorldServices/RFI VA MISI - Code Challenge/aws-misi3-{plan|deploy}` (both the spaced and `%20` forms, as challenge 2 learned).
-- AC2 Plan role: ReadOnly + state read for `dev/*` and `bootstrap/*` keys + lock files + `secretsmanager:GetSecretValue` on `misi3/*` only. Deploy role: create/destroy the dev stack services (EC2/VPC, ELB, ACM, Route 53, ECS, RDS, S3 for `misi3-*` buckets, Secrets Manager `misi3/*`, CloudWatch Logs, Service Discovery, IAM under `/misi3/` with scoped `iam:PassRole`), ECR push/pull on the two repositories only, explicit denies on deleting the hand-made resources and on modifying `/ado/` roles.
+#### E14-02 Bootstrap: GitHub Actions OIDC roles · M0
+- AC1 `infra/bootstrap` reads the GitHub Actions OIDC provider (`token.actions.githubusercontent.com`) if present and creates it only when absent; creates `misi3-gha-plan` and `misi3-gha-deploy` under path `/gha/` with audience `sts.amazonaws.com` and repository/environment-scoped trust for `wslabwsllc/misi-code-challenge-brief-3`.
+- AC2 Plan role: ReadOnly + state read for `dev/*`, `prod/*` and `bootstrap/*` keys + lock files. Deploy role: create/destroy only the selected `dev` or protected `prod` stack services (VPC, ELB, ACM, Route 53, ECS, RDS, S3, Secrets Manager, CloudWatch Logs, Service Discovery, IAM under `/misi3/` with scoped `iam:PassRole`), ECR push/pull on the two repositories only, explicit denies on deleting hand-made resources and on modifying `/gha/` roles.
 - AC3 Human applies it (guide step) with state key `bootstrap/terraform.tfstate`; outputs recorded; challenge-2 roles and provider unchanged (verified by `terraform plan` showing no changes outside new roles/policies).
 
 #### E14-03 Terraform skeleton · M0
-- AC1 Layout `infra/{manual,bootstrap,modules/*,envs/dev,scripts}`; modules copied from challenge 2 and renamed; `envs/dev` backend `s3` with `use_lockfile = true`; `terraform init -backend=false && validate` clean.
-- AC2 Pipeline inputs (`image_tag`, `base_domain`, `dns_mode`) come only from `TF_VAR_*`; `terraform.tfvars` holds sizing only (challenge-2 lesson: tfvars overrides env vars).
+- AC1 Layout `infra/{manual,bootstrap,modules/*,envs/dev,envs/prod,scripts}`; modules copied from challenge 2 and renamed; each environment has separate S3 state with `use_lockfile = true`; `terraform init -backend=false && validate` is clean for both.
+- AC2 Pipeline inputs (`environment`, `image_tag`, `base_domain`, `route53_zone_id`, `dns_mode`) come only from `TF_VAR_*`; `terraform.tfvars` holds sizing only. Empty `base_domain` is a supported no-domain HTTP deployment.
 
 #### E14-04 Network · M0
 - AC1 VPC `10.41.0.0/16`, two AZs, public / private-app / database subnets, one NAT gateway (accepted single-AZ risk), flow logs (30-day Terraform-owned log group), default SG with no rules.
@@ -749,17 +750,17 @@ Rules for every Terraform story (carried from challenge 2): exact pins and commi
 
 #### E14-05 Database and secrets · M0
 - AC1 RDS PostgreSQL 18 (latest 18.x available in us-east-1, verified), `db.t4g.micro`, gp3 20→100 GiB, encrypted, private, 7-day backups, deletion protection and final snapshot as variables, Enhanced Monitoring off, parameter group `rds.force_ssl=1`.
-- AC2 Secrets Manager (`recovery_window_in_days = 0`), all generated by `random_password`: `misi3/dev/db-password`, `misi3/dev/seed-credentials` (JSON keyed by the seed user names read from code; `Seed__AllowDemoPassword` is never set in AWS, so the README demo password cannot work there), `misi3/dev/integration-secrets` (registry API key, calendar client secret, webhook HMAC secret, mock admin key, permit token signing key) shared by app and mocks.
+- AC2 Secrets Manager (`recovery_window_in_days = 0`), all generated by `random_password`: `misi3/<environment>/db-password`, `misi3/<environment>/seed-credentials` (JSON keyed by the seed user names read from code; `Seed__AllowDemoPassword` is never set in AWS, so the README demo password cannot work there), `misi3/<environment>/integration-secrets` (registry API key, calendar client secret, webhook HMAC secret, mock admin key, permit token signing key) shared by app and mocks.
 - AC3 App connection uses `SSL Mode=VerifyFull` with the RDS CA bundle in the image (A-15); a non-SSL connection is refused (evidence in E14-12).
 
 #### E14-06 Object storage · M0
-- AC1 S3 bucket `misi3-dev-files-<random suffix>`: Block Public Access, bucket-owner-enforced, SSE-S3, TLS-only bucket policy, `force_destroy = true`, lifecycle expiring orphan staging objects; no CORS (browser downloads use pre-signed GETs only).
+- AC1 S3 bucket `misi3-<environment>-files-<random suffix>`: Block Public Access, bucket-owner-enforced, SSE-S3, TLS-only bucket policy, `force_destroy = true`, lifecycle expiring orphan staging objects; no CORS (browser downloads use pre-signed GETs only).
 - AC2 Task roles: web and worker read/write `attachments/*`, `permits/*`, read/delete `partner-drop/*`; partner-feed mock write `partner-drop/*` only; migrate task write for seed files. Pre-signed URLs work with the task role (tested in E14-12).
 
 #### E14-07 Load balancer · M0
-- AC1 Reuse challenge-2 module: HTTP mode (no domain, OD-3) and HTTPS mode (ACM DNS validation, TLS 1.3/1.2 policy verified by name, :80 → 301, host-header rule, other hosts 404); sticky `lb_cookie` 1 day; health check `/health/ready`; idle timeout 120 s; `drop_invalid_header_fields`.
+- AC1 Modular ALB: HTTP mode (no domain, OD-3) and HTTPS mode using `aws_acm_certificate`, `aws_route53_record`, `aws_acm_certificate_validation`, `ELBSecurityPolicy-TLS13-1-2-2021-06`, :80 → 301 preserving `#{protocol}`, `#{host}`, `#{path}` and `#{query}`, host-header rule and other-host 404; sticky `lb_cookie` 1 day; health check `/health/ready`; idle timeout 120 s; `drop_invalid_header_fields`.
 - AC2 Only the ALB is public; tasks have no public IPs. A listener rule (both modes) answers `/webhooks/*` with a fixed 403 so callbacks arrive only from inside the VPC.
-- AC3 Host name per section 4.6: replace challenge-2's `app_domain` input with `base_domain` + derived `app_host` (`dev-brief3.<base_domain>`). The certificate, host rule, Route 53 alias (`route53-existing` / `route53-new`) and the external-DNS CNAME output all use `app_host`; `terraform plan` with `base_domain=example.com` shows `dev-brief3.example.com` everywhere and nothing named `dev.example.com` (tested with a plan on a scratch copy, as in challenge 2). Validation rejects a `base_domain` with a scheme, trailing dot or upper case.
+- AC3 Derive `app_host` only when `base_domain` is non-empty. The certificate, host rule, Route 53 alias (`route53-existing` / `route53-new`) and external-DNS CNAME output use `${environment}-brief3.<base_domain>`; without a domain no certificate, DNS record or HTTPS listener exists. The HTTPS listener explicitly depends on certificate validation. Validation rejects a `base_domain` with a scheme, trailing dot or upper case.
 
 #### E14-08 ECS cluster and services · M0 (web, worker, mock-registry) / M2 (all mocks)
 - AC1 Cluster `misi3-dev` with Container Insights (its log group created by Terraform first), Service Connect namespace `misi3-dev.local`.
@@ -782,22 +783,22 @@ Rules for every Terraform story (carried from challenge 2): exact pins and commi
 #### E14-12 AWS acceptance evidence · M4
 - AC1 Table in STATUS.md, each row passed/failed/not executed with evidence: smoke script; remote browser journey (E15-03); each role logs in; upload + pre-signed download + expiry; webhook delivered through Service Connect; Data Protection keys shared (login survives forced redeploy); mock outage drill (scale a mock to 0 → hub Offline, app serving); seed idempotent; RDS non-SSL refused; tasks not directly reachable; `/webhooks/*` from the internet → 403; the README demo password is rejected; the landing page `/` loads anonymously and shows no credentials; HTTPS mode only: certificate ISSUED for `dev-brief3.<base_domain>` and auto-renewal eligible, cookies `Secure`.
 
-### E15 — Azure DevOps CI/CD
+### E15 — GitHub Actions CI/CD
 
-#### E15-01 [HUMAN + agent] Azure DevOps setup guide · M0
-- AC1 `docs/aws/AZURE-DEVOPS-SETUP-GUIDE.md` adapted from challenge 2 with only the steps still needed: verify parallel jobs and AWS Toolkit (already done for challenge 2), create ECR/state bucket (E14-01), apply bootstrap (E14-02), service connections `aws-misi3-plan` / `aws-misi3-deploy` (OIDC), environment `aws-misi3-dev` with an Exclusive Lock check, branch control on the deploy connection (`refs/heads/main`), variable group `misi3-aws-dev` (non-secret values: `AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_STATE_BUCKET`, `BASE_DOMAIN` (empty = HTTP mode), `DNS_MODE`), a "Domain" section explaining that a domain gives `https://dev-brief3.<domain>` and which DNS record the human adds in external mode, three pipelines `misi3-pr-validation`, `misi3-deploy`, `misi3-destroy`, branch policy on `main`.
-- AC2 A temporary run prints `aws sts get-caller-identity` per connection showing the expected role.
+#### E15-01 [HUMAN + agent] GitHub Actions and AWS setup guide · M0
+- AC1 `docs/aws/GITHUB-ACTIONS-SETUP-GUIDE.md` documents the human steps: create ECR/state bucket (E14-01), apply bootstrap (E14-02), create protected GitHub Environments `aws-misi3-dev` and `aws-misi3-prod` with deployment branch rules and optional reviewers, configure non-secret repository variables (`AWS_REGION`, `AWS_ACCOUNT_ID`, `TF_STATE_BUCKET`, `BASE_DOMAIN` empty for current HTTP mode, `DNS_MODE`), configure the `main` ruleset, and explain that a future domain enables ACM DNS validation and HTTPS.
+- AC2 A temporary GitHub Actions identity-check workflow prints `aws sts get-caller-identity` using OIDC and is removed or disabled after verification.
 
 #### E15-02 PR validation pipeline · M0
-- AC1 `pipelines/pr-validation.yml` (pinned `ubuntu-24.04`, tools by checksum): locked restore, build, unit + integration tests (Testcontainers), Compose stack up + browser/axe suite, publish TRX and the HTML test report, Docker build of both images + Trivy, Terraform fmt/validate/TFLint/Trivy config + plan with the plan role (no plan file artifacts), Gitleaks, static guards.
+- AC1 `.github/workflows/pr-validation.yml` (pinned `ubuntu-24.04`, tools by checksum): locked restore, build, unit + integration tests (Testcontainers), Docker Compose stack up + browser/axe suite, publish TRX and the HTML test report, Docker build of both images + Trivy, Terraform fmt/validate/TFLint/Trivy config + plan with the plan role (no plan file artifacts), Gitleaks, static guards.
 - AC2 A PR with a failing test, a fmt error or a fake secret fails the right job (recorded run URLs).
 
 #### E15-03 Deploy pipeline · M0
-- AC1 Manual run from `main` (parameter `imageTag` for redeploy/rollback): build + test + images tagged with the commit SHA → plan (log only) → deployment job on `aws-misi3-dev` pushes images and applies (migrate first) → verify job runs `infra/scripts/smoke-https.sh dev-brief3.<base_domain>` (redirect, certificate for that exact host, TLS 1.2/1.3 only, headers, ALB DNS name → 404, `/webhooks/delivery` → 403) or `smoke-http.sh <alb-dns-name>` in HTTP mode (both also check that `/` returns the landing page anonymously), then a remote Playwright smoke subset (login per role, page reachability for all 26 routes, one permit download) using seed credentials from Secrets Manager written to a temp file deleted with `always()`.
+- AC1 Manual run from `main` (parameters `environment=dev|prod` and `imageTag` for redeploy/rollback): build + test + images tagged with the commit SHA → plan (log only) → deployment job on the protected environment pushes images and applies (migrate first) → verify runs the HTTP smoke script while `base_domain` is empty, or the HTTPS script when a domain is configured (301 redirect, validated certificate, modern TLS policy, headers, host rejection, `/webhooks/delivery` → 403), then a remote Playwright smoke subset (login per role, page reachability for all 26 routes, one permit download) using seed credentials from Secrets Manager written to a temp file deleted with `always()`. Production requires its own approval gate.
 - AC2 Rollback by `imageTag` proven once.
 
 #### E15-04 Destroy pipeline and drill · M4
-- AC1 `pipelines/destroy.yml`: manual, double confirmation, protection off then destroy, leftover check by tags, log groups, Cloud Map namespace and secrets; only the hand-made resources and the optional final snapshot remain.
+- AC1 `.github/workflows/destroy.yml`: manual, double confirmation, protected-environment approval, protection off then destroy, leftover check by tags, log groups, Cloud Map namespace and secrets; only hand-made resources and the optional final snapshot remain.
 - AC2 Destroy → redeploy drill executed with the user's go-ahead at that moment, or recorded as not executed.
 
 ### E16 — Documentation and submission package (brief §10)
@@ -896,7 +897,7 @@ Rules for every Terraform story (carried from challenge 2): exact pins and commi
 | §8 integration acceptance tests | E3-02 AC3, E13-01, E12-04, E13-03 |
 | §9 seed and live journey | E12-01…E12-05 |
 | §10 technical delivery, acceptance and submission | E0-02, E0-03, E13-04, E13-05, E16-* |
-| User requirement: AWS deployment via Azure DevOps | E0-07, E14-*, E15-* |
+| User requirement: AWS deployment via GitHub Actions | E0-07, E14-*, E15-* |
 | User requirement: public landing page | E0-09 |
 
 ---
@@ -934,3 +935,4 @@ Rules for every Terraform story (carried from challenge 2): exact pins and commi
 | 2026-10-15 | Initial plan | user + Claude |
 | 2026-10-15 | User decisions: fixed local demo password `EventPermits!Demo2026` in README (OD-2, A-02, guarded by `Seed:AllowDemoPassword`; AWS keeps generated passwords); public landing page at `/` (new E0-09). Pointer to the split tracks | user + Claude |
 | 2026-10-15 | User confirmed .NET 10 (OD-1). Domain rule: app host `dev-brief3.<base_domain>` (section 4.6, OD-3, E14-07, E15-01/03, E14-12). Review fixes: check-in recorded only by the assigned attendant (brief §5); two-layer expiring links with friendly expiry page (A-16); MinIO S3 port on loopback; one-command seeded start; webhook path internal-only; calendar push timing (A-27); edit/upload rights (A-26); local HTTP (A-25); Data Protection limitation (A-28); env-var mock modes; shared mock/seed reference data; explicit brief §8 test checklist; T6 guard completed | user + Claude |
+| 2026-10-15 | User replaced Azure DevOps with GitHub Actions, confirmed GitHub as the source repository, added protected AWS prod alongside dev, retained Docker Compose for local development/testing, and confirmed no domain is currently available. Updated active plans/prompts for conditional ACM/Route 53 HTTPS and ALB-DNS HTTP until a domain is supplied; archived `z_*` plans remain historical and are not used | user + Claude |
